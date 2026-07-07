@@ -1,0 +1,246 @@
+#!/usr/bin/env node
+/* msn — Missions app CLI. Zero deps, Node >= 18.
+ * Auth + data via Supabase REST; RLS enforces the same permissions as the web app. */
+
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const readline = require("readline");
+
+const URL_ = "https://impdannmrwfcphkkgyaj.supabase.co";
+const ANON = "sb_publishable_2Q-FE_KrJmNuhrjXogPmWw_zBSCU0uy"; // public by design; RLS is the security layer
+const CONF_DIR = path.join(os.homedir(), ".config", "msn");
+const CONF = path.join(CONF_DIR, "config.json");
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+const red = (s) => `\x1b[31m${s}\x1b[0m`;
+const lime = (s) => `\x1b[92m${s}\x1b[0m`;
+const STATUS_GLYPH = { todo: "○", doing: "◐", done: lime("●") };
+
+function loadConf() {
+  try { return JSON.parse(fs.readFileSync(CONF, "utf8")); } catch { return null; }
+}
+function saveConf(c) {
+  fs.mkdirSync(CONF_DIR, { recursive: true });
+  fs.writeFileSync(CONF, JSON.stringify(c, null, 2), { mode: 0o600 });
+}
+
+function ask(q, { hidden = false } = {}) {
+  return new Promise((res) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    if (!hidden) return rl.question(q, (a) => { rl.close(); res(a.trim()); });
+    process.stdout.write(q);
+    let buf = "";
+    const onData = (ch) => {
+      const c = ch.toString();
+      if (c === "\n" || c === "\r" || c === "\u0004") {
+        process.stdin.removeListener("data", onData);
+        process.stdout.write("\n");
+        rl.close(); res(buf.trim());
+      } else if (c === "\u0003") { process.stdout.write("\n"); process.exit(1); }
+      else if (c === "\u007f" || c === "\b") { buf = buf.slice(0, -1); }
+      else buf += c;
+    };
+    rl.output.write = () => {}; // mute echoing
+    process.stdin.on("data", onData);
+  });
+}
+
+async function authFetch(pathname, opts = {}, retry = true) {
+  const conf = loadConf();
+  if (!conf?.access_token) die("Not logged in. Run: msn login");
+  const r = await fetch(URL_ + pathname, {
+    ...opts,
+    headers: {
+      apikey: ANON,
+      Authorization: `Bearer ${conf.access_token}`,
+      "Content-Type": "application/json",
+      Prefer: opts.method === "POST" || opts.method === "PATCH" ? "return=representation" : undefined,
+      ...(opts.headers || {}),
+    },
+  });
+  if (r.status === 401 && retry && conf.refresh_token) {
+    const ok = await refresh(conf);
+    if (ok) return authFetch(pathname, opts, false);
+    die("Session expired. Run: msn login");
+  }
+  return r;
+}
+
+async function refresh(conf) {
+  const r = await fetch(`${URL_}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: { apikey: ANON, "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: conf.refresh_token }),
+  });
+  if (!r.ok) return false;
+  const j = await r.json();
+  saveConf({ ...conf, access_token: j.access_token, refresh_token: j.refresh_token });
+  return true;
+}
+
+function die(msg) { console.error(red(msg)); process.exit(1); }
+
+async function jsonOrDie(r, what) {
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).message || ""; } catch {}
+    die(`${what} failed (HTTP ${r.status})${detail ? ": " + detail : ""}`);
+  }
+  return r.json();
+}
+
+async function resolveMission(key) {
+  const r = await authFetch(`/rest/v1/missions?select=id,key,name&key=ilike.${encodeURIComponent(key)}`);
+  const rows = await jsonOrDie(r, "Mission lookup");
+  if (!rows.length) die(`No mission with key "${key.toUpperCase()}" (or no access).`);
+  return rows[0];
+}
+
+async function resolveTask(ref) {
+  const m = ref.match(/^([A-Za-z]{2,5})-(\d+)$/);
+  if (!m) die(`Invalid task ref "${ref}" — expected like TEL-12`);
+  const mission = await resolveMission(m[1]);
+  const r = await authFetch(`/rest/v1/tasks?select=id,number,title,status,due_date,postponed_count&mission_id=eq.${mission.id}&number=eq.${m[2]}`);
+  const rows = await jsonOrDie(r, "Task lookup");
+  if (!rows.length) die(`No task ${m[1].toUpperCase()}-${m[2]} (or no access).`);
+  return { ...rows[0], mission };
+}
+
+function fmtDate(d) {
+  if (!d) return "";
+  const dt = new Date(d + "T00:00:00");
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const s = dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return dt < today ? red(s) : dt.getTime() === today.getTime() ? lime(s) : dim(s);
+}
+
+function printTasks(rows, { withMission = false } = {}) {
+  if (!rows.length) return console.log(dim("  nothing here."));
+  for (const t of rows) {
+    const key = withMission && t.missions ? dim(`${t.missions.key}-${t.number}`.padEnd(8)) : dim(String(t.number).padStart(3) + " ");
+    const glyph = STATUS_GLYPH[t.status] || "○";
+    const title = t.status === "done" ? dim(t.title) : t.title;
+    const prio = t.priority === "p1" ? red("!1 ") : t.priority === "p2" ? "!2 " : "";
+    console.log(`  ${key} ${glyph}  ${prio}${title} ${fmtDate(t.due_date)}`);
+  }
+}
+
+const [, , cmd, ...args] = process.argv;
+
+(async () => {
+  switch (cmd) {
+    case "login": {
+      const email = args[0] || (await ask("email: "));
+      const password = await ask("password: ", { hidden: true });
+      const r = await fetch(`${URL_}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { apikey: ANON, "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!r.ok) die("Login failed — check credentials.");
+      const j = await r.json();
+      saveConf({ email, access_token: j.access_token, refresh_token: j.refresh_token, user_id: j.user.id });
+      console.log(lime(`Logged in as ${email}`));
+      break;
+    }
+
+    case "today": {
+      const today = new Date().toISOString().slice(0, 10);
+      const r = await authFetch(
+        `/rest/v1/tasks?select=number,title,status,due_date,priority,today_order,missions!inner(key,kind)` +
+        `&status=neq.done&due_date=lte.${today}&order=today_order.asc.nullslast,due_date.asc`);
+      const rows = await jsonOrDie(r, "Today");
+      console.log(bold(`Today — ${rows.length} open`));
+      printTasks(rows, { withMission: true });
+      break;
+    }
+
+    case "ls": {
+      if (!args[0]) die("Usage: msn ls <mission-key> [--all]");
+      const mission = await resolveMission(args[0]);
+      const all = args.includes("--all");
+      const r = await authFetch(
+        `/rest/v1/tasks?select=number,title,status,due_date,priority&mission_id=eq.${mission.id}` +
+        (all ? "" : "&status=neq.done") + `&order=status.desc,number.asc&limit=100`);
+      const rows = await jsonOrDie(r, "List");
+      console.log(bold(`${mission.key} — ${mission.name}`));
+      printTasks(rows.map((t) => ({ ...t })));
+      if (!all) {
+        const rc = await authFetch(`/rest/v1/tasks?select=id&mission_id=eq.${mission.id}&status=eq.done`, { headers: { Prefer: "count=exact", Range: "0-0" } });
+        const total = rc.headers.get("content-range")?.split("/")[1];
+        if (total && total !== "0") console.log(dim(`  + ${total} done (msn ls ${mission.key} --all)`));
+      }
+      break;
+    }
+
+    case "add": {
+      if (args.length < 2) die('Usage: msn add <mission-key> "title" [!1|!2|!3] [#tag ...]');
+      const mission = await resolveMission(args[0]);
+      let priority = "p2"; const tags = []; const words = [];
+      for (const w of args.slice(1)) {
+        if (/^!(1|2|3)$/.test(w)) priority = "p" + w[1];
+        else if (w.startsWith("#") && w.length > 1) tags.push(w.slice(1));
+        else words.push(w);
+      }
+      const title = words.join(" ").trim();
+      if (!title) die("Empty title.");
+      const conf = loadConf();
+      const r = await authFetch(`/rest/v1/tasks`, {
+        method: "POST",
+        body: JSON.stringify({ mission_id: mission.id, title, priority, tags, status: "todo", source: "manual", is_client_visible: false, created_by: conf.user_id }),
+      });
+      const [t] = await jsonOrDie(r, "Create");
+      console.log(lime(`✓ ${mission.key}-${t.number}`) + `  ${title}`);
+      break;
+    }
+
+    case "done":
+    case "start": {
+      if (!args[0]) die(`Usage: msn ${cmd} <KEY-n>`);
+      const t = await resolveTask(args[0]);
+      const patch = cmd === "done" ? { status: "done", done_at: new Date().toISOString() } : { status: "doing" };
+      const r = await authFetch(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      await jsonOrDie(r, "Update");
+      console.log(`${cmd === "done" ? lime("● done") : "◐ doing"}  ${t.mission.key}-${t.number}  ${t.title}`);
+      break;
+    }
+
+    case "postpone": {
+      if (args.length < 2) die("Usage: msn postpone <KEY-n> <+3d | 2026-07-12 | monday>");
+      const t = await resolveTask(args[0]);
+      let target;
+      const rel = args[1].match(/^\+(\d+)d$/);
+      if (rel) { const d = new Date(); d.setDate(d.getDate() + Number(rel[1])); target = d.toISOString().slice(0, 10); }
+      else if (/^\d{4}-\d{2}-\d{2}$/.test(args[1])) target = args[1];
+      else if (args[1] === "monday") { const d = new Date(); d.setDate(d.getDate() + (((1 - d.getDay() + 7) % 7) || 7)); target = d.toISOString().slice(0, 10); }
+      else die("Date must be +Nd, YYYY-MM-DD, or monday");
+      const r = await authFetch(`/rest/v1/tasks?id=eq.${t.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ due_date: target, postponed_count: (t.postponed_count ?? 0) + 1 }),
+      });
+      await jsonOrDie(r, "Postpone");
+      console.log(`→ ${t.mission.key}-${t.number} postponed to ${target}`);
+      break;
+    }
+
+    case "whoami": {
+      const conf = loadConf();
+      if (!conf) die("Not logged in.");
+      console.log(conf.email);
+      break;
+    }
+
+    default:
+      console.log(`${bold("msn")} — Missions from the terminal
+  msn login [email]
+  msn today                       your open tasks due/overdue
+  msn ls <KEY> [--all]            mission tasks
+  msn add <KEY> "title" [!1] [#tag]
+  msn start <KEY-n>               mark doing
+  msn done <KEY-n>                mark done
+  msn postpone <KEY-n> +3d|monday|YYYY-MM-DD
+  msn whoami`);
+  }
+})().catch((e) => die(e.message || String(e)));
