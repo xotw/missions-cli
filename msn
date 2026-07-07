@@ -143,14 +143,19 @@ const [, , cmd, ...args] = process.argv;
 (async () => {
   switch (cmd) {
     case "login": {
-      const email = args[0] || (await ask("email: "));
+      const email = (args[0] || (await ask("email: "))).trim();
       const password = await ask("password: ", { hidden: true });
+      console.log(dim(`(email "${email}", ${password.length} char password)`));
       const r = await fetch(`${URL_}/auth/v1/token?grant_type=password`, {
         method: "POST",
         headers: { apikey: ANON, "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      if (!r.ok) die("Login failed — check credentials.");
+      if (!r.ok) {
+        let body = {};
+        try { body = await r.json(); } catch {}
+        die(`Login failed (HTTP ${r.status}) — ${body.error_code || body.error || ""}: ${body.msg || body.error_description || body.message || "no detail"}`);
+      }
       const j = await r.json();
       saveConf({ email, access_token: j.access_token, refresh_token: j.refresh_token, user_id: j.user.id });
       console.log(lime(`Logged in as ${email}`));
