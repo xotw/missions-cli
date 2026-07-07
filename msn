@@ -28,22 +28,33 @@ function saveConf(c) {
 
 function ask(q, { hidden = false } = {}) {
   return new Promise((res) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-    if (!hidden) return rl.question(q, (a) => { rl.close(); res(a.trim()); });
+    if (!hidden) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+      return rl.question(q, (a) => { rl.close(); res(a.trim()); });
+    }
+    const stdin = process.stdin;
     process.stdout.write(q);
+    stdin.resume();
+    stdin.setEncoding("utf8");
+    const rawCapable = stdin.isTTY && typeof stdin.setRawMode === "function";
+    if (rawCapable) stdin.setRawMode(true);
     let buf = "";
-    const onData = (ch) => {
-      const c = ch.toString();
-      if (c === "\n" || c === "\r" || c === "\u0004") {
-        process.stdin.removeListener("data", onData);
-        process.stdout.write("\n");
-        rl.close(); res(buf.trim());
-      } else if (c === "\u0003") { process.stdout.write("\n"); process.exit(1); }
-      else if (c === "\u007f" || c === "\b") { buf = buf.slice(0, -1); }
-      else buf += c;
+    const finish = () => {
+      if (rawCapable) stdin.setRawMode(false);
+      stdin.pause();
+      stdin.removeListener("data", onData);
+      process.stdout.write("\n");
+      res(buf.trim());
     };
-    rl.output.write = () => {}; // mute echoing
-    process.stdin.on("data", onData);
+    const onData = (chunk) => {
+      for (const c of chunk.toString()) {
+        if (c === "\n" || c === "\r" || c === "\u0004") return finish();
+        if (c === "\u0003") { if (rawCapable) stdin.setRawMode(false); process.stdout.write("\n"); process.exit(1); }
+        else if (c === "\u007f" || c === "\b") buf = buf.slice(0, -1);
+        else if (c >= " ") buf += c;
+      }
+    };
+    stdin.on("data", onData);
   });
 }
 
