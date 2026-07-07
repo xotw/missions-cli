@@ -225,6 +225,109 @@ const [, , cmd, ...args] = process.argv;
       break;
     }
 
+    case "ms":
+    case "missions": {
+      const kindOf = { client: "Missions", internal: "Interne", team: "Équipe" };
+      const r = await authFetch(`/rest/v1/missions?select=key,name,kind,status,mission_type&order=kind.asc,key.asc`);
+      const rows = await jsonOrDie(r, "Missions");
+      for (const kind of ["client", "internal", "team"]) {
+        const group = rows.filter((m) => m.kind === kind);
+        if (!group.length) continue;
+        console.log(bold(kindOf[kind]));
+        for (const m of group) {
+          const t = m.mission_type ? dim(` ${m.mission_type}`) : "";
+          const st = m.status !== "active" ? dim(` (${m.status})`) : "";
+          console.log(`  ${dim(m.key.padEnd(5))} ${m.name}${t}${st}`);
+        }
+      }
+      break;
+    }
+
+    case "mine": {
+      const conf = loadConf();
+      const r = await authFetch(
+        `/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key)` +
+        `&assignee_id=eq.${conf.user_id}&status=neq.done&order=due_date.asc.nullslast`);
+      const rows = await jsonOrDie(r, "Mine");
+      console.log(bold(`Assigned to me — ${rows.length} open`));
+      printTasks(rows, { withMission: true });
+      break;
+    }
+
+    case "week": {
+      const now = new Date(); const day = now.getDay() || 7;
+      const mon = new Date(now); mon.setDate(now.getDate() - (day - 1));
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+      const iso = (d) => d.toISOString().slice(0, 10);
+      const r = await authFetch(
+        `/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key)` +
+        `&status=neq.done&due_date=gte.${iso(mon)}&due_date=lte.${iso(sun)}&order=due_date.asc`);
+      const rows = await jsonOrDie(r, "Week");
+      const byDay = {};
+      for (const t of rows) (byDay[t.due_date] ??= []).push(t);
+      console.log(bold(`This week — ${rows.length} tasks`));
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(mon); d.setDate(mon.getDate() + i); const k = iso(d);
+        const label = d.toLocaleDateString("en-US", { weekday: "short", day: "numeric" });
+        if (byDay[k]?.length) { console.log(bold("\n" + label)); printTasks(byDay[k], { withMission: true }); }
+      }
+      break;
+    }
+
+    case "new": {
+      if (args.length < 2) die('Usage: msn new <client|internal|team> "Name" [KEY]');
+      const kind = args[0];
+      if (!["client", "internal", "team"].includes(kind)) die("Kind must be client, internal, or team.");
+      const name = args[1];
+      const key = (args[2] || name.replace(/[^a-zA-Z]/g, "").slice(0, 3)).toUpperCase();
+      const colors = ["#DDFF56", "#7DD3FC", "#F0ABFC", "#FCA5A5", "#FDBA74"];
+      const payload = { name, key, kind, color: colors[Math.floor(name.length % colors.length)], status: "active",
+        visibility: kind === "team" ? "team" : "private" };
+      if (kind === "client") payload.mission_type = "custom_build";
+      const r = await authFetch(`/rest/v1/rpc/create_mission`, { method: "POST", body: JSON.stringify({ _payload: payload }) });
+      const out = await jsonOrDie(r, "Create mission");
+      const m = Array.isArray(out) ? out[0] : out;
+      console.log(lime(`✓ ${m?.key || key}`) + `  ${name}  ${dim(kind)}`);
+      break;
+    }
+
+    case "extra": {
+      if (args.length < 1) die('Usage: msn extra <hours> [KEY] "note"');
+      const hours = parseFloat(args[0]);
+      if (!(hours > 0)) die("Hours must be a positive number.");
+      let mission_id = null; const rest = [];
+      for (const w of args.slice(1)) {
+        if (!mission_id && /^[A-Za-z]{2,5}$/.test(w) && !w.includes(" ")) {
+          try { mission_id = (await resolveMission(w)).id; continue; } catch {}
+        }
+        rest.push(w);
+      }
+      const conf = loadConf();
+      const r = await authFetch(`/rest/v1/time_entries`, {
+        method: "POST",
+        body: JSON.stringify({ profile_id: conf.user_id, entry_date: new Date().toISOString().slice(0, 10),
+          hours, mission_id, note: rest.join(" ") || null, source: "extra" }),
+      });
+      await jsonOrDie(r, "Log extra");
+      console.log(lime(`✓ ${hours}h extra`) + (rest.length ? `  ${rest.join(" ")}` : "") + dim("  (production)"));
+      break;
+    }
+
+    case "comment": {
+      if (args.length < 2) die('Usage: msn comment <KEY-n> "text" [--question]');
+      const t = await resolveTask(args[0]);
+      const isQ = args.includes("--question");
+      const body = args.slice(1).filter((w) => w !== "--question").join(" ");
+      const conf = loadConf();
+      const r = await authFetch(`/rest/v1/comments`, {
+        method: "POST",
+        body: JSON.stringify({ task_id: t.id, body, author_id: conf.user_id, is_question: isQ }),
+      });
+      await jsonOrDie(r, "Comment");
+      console.log(`${isQ ? "?" : "💬"} ${t.mission.key}-${t.number}  ${body}`);
+      break;
+    }
+
     case "whoami": {
       const conf = loadConf();
       if (!conf) die("Not logged in.");
@@ -234,13 +337,21 @@ const [, , cmd, ...args] = process.argv;
 
     default:
       console.log(`${bold("msn")} — Missions from the terminal
-  msn login [email]
-  msn today                       your open tasks due/overdue
-  msn ls <KEY> [--all]            mission tasks
+  ${bold("Tasks")}
+  msn today                       open tasks due/overdue
+  msn week                        this week's tasks by day
+  msn mine                        tasks assigned to me
+  msn ls <KEY> [--all]            a mission's tasks
   msn add <KEY> "title" [!1] [#tag]
-  msn start <KEY-n>               mark doing
-  msn done <KEY-n>                mark done
+  msn start|done <KEY-n>          set doing / done
   msn postpone <KEY-n> +3d|monday|YYYY-MM-DD
-  msn whoami`);
+  msn comment <KEY-n> "text" [--question]
+  ${bold("Missions")}
+  msn missions                    all projects, grouped
+  msn new <client|internal|team> "Name" [KEY]
+  ${bold("Time")}
+  msn extra <hours> [KEY] "note"  log extra (always production)
+  ${bold("Account")}
+  msn login [email] · msn whoami`);
   }
 })().catch((e) => die(e.message || String(e)));
