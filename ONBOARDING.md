@@ -50,22 +50,18 @@ Prefer typing? The same actions exist as `msn` commands — run `msn` with no ar
 
 ### Prerequisites
 - **Node.js 18+** — check with `node --version`. (Install: `brew install node` on Mac.)
-- **GitHub CLI** — check with `gh auth status`. (Install: `brew install gh`, then `gh auth login`.) Needed only to download the files from the private repo.
 - **Claude Code** — for the conversational part.
 
 ### Steps
 
 ```sh
-# 1. Download the CLI and the MCP server
-mkdir -p ~/.config/msn
-gh api -H "Accept: application/vnd.github.raw" repos/xotw/missions-cli/contents/msn         | sudo tee /usr/local/bin/msn > /dev/null && sudo chmod +x /usr/local/bin/msn
-gh api -H "Accept: application/vnd.github.raw" repos/xotw/missions-cli/contents/mcp-server.js > ~/.config/msn/mcp-server.js
+# 1. Install (downloads the CLI + MCP server, registers with Claude Code)
+curl -fsSL https://raw.githubusercontent.com/xotw/missions-cli/main/install.sh | bash
 
-# 2. Log in with your Missions app email + password (creates your own session)
+# 2. Log in with your Missions app email + password
 msn login your-email@bulldozer-collective.com
 
-# 3. Register the MCP server with Claude Code (global, all sessions)
-claude mcp add --scope user missions -- node ~/.config/msn/mcp-server.js
+# 3. Restart Claude Code — the "missions" tools load at session start
 ```
 
 Then **restart Claude Code** (MCP tools load at session start) and try: *"what's on for today?"*
