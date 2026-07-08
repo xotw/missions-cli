@@ -31,3 +31,23 @@ msn login [email] · msn whoami
 ```
 
 Token auto-refreshes; config in `~/.config/msn/config.json` (chmod 600). Everything runs through Supabase REST under your JWT — same permissions as the web app.
+
+## MCP server (talk to your missions inside Claude Code)
+
+`mcp-server.js` exposes the same actions as MCP tools, so you drive missions
+conversationally in Claude Code instead of typing commands. It reuses your
+`msn login` session (same RLS).
+
+Setup (after `msn login`):
+```sh
+# download the server to a stable path
+gh api -H "Accept: application/vnd.github.raw" repos/xotw/missions-cli/contents/mcp-server.js > ~/.config/msn/mcp-server.js
+# register it with Claude Code
+claude mcp add missions -- node ~/.config/msn/mcp-server.js
+```
+
+Then in any Claude Code session: "what's on for today?", "mark TALE-3 done",
+"repousse MODJ-7 à lundi", "crée une mission client Acme", "log 2h extra on MSN".
+
+Tools: list_missions · list_tasks · today · my_tasks · add_task · complete_task ·
+start_task · postpone_task · comment_task · new_mission · log_extra_hours.
