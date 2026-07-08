@@ -551,25 +551,41 @@ const TOOLS = {
     description: "List a tool stack, grouped by category. No argument → the global team stack (Bulldozer's own tools). With mission_key → that mission's customer stack (the tools the client uses).",
     schema: { type: "object", properties: { mission_key: { type: "string" } } },
     run: async (a) => {
-      let filter = "mission_id=is.null", scope = "TEAM STACK";
-      if (a.mission_key) { const m = await resolveMission(a.mission_key); filter = `mission_id=eq.${m.id}`; scope = `${m.key} — ${m.name} · CUSTOMER STACK`; }
-      const rows = await api(`/rest/v1/stack_tools?select=name,category,description&${filter}&order=category.asc,name.asc`);
+      let filter = "mission_id=is.null", scope = "TEAM STACK", mission = false;
+      if (a.mission_key) { const m = await resolveMission(a.mission_key); filter = `mission_id=eq.${m.id}`; scope = `${m.key} — ${m.name} · CUSTOMER STACK`; mission = true; }
+      const rows = await api(`/rest/v1/stack_tools?select=name,category,description,visible_to_head,visible_to_client&${filter}&order=category.asc,name.asc`);
       if (!rows.length) return `${scope}: empty.`;
+      const vis = (t) => { const v = []; if (t.visible_to_head) v.push("head"); if (t.visible_to_client) v.push("client"); return v.length ? ` [visible: ${v.join("+")}]` : ""; };
       const byCat = {}; for (const t of rows) (byCat[t.category] = byCat[t.category] || []).push(t);
-      return `${scope}\n` + Object.entries(byCat).map(([c, ts]) => c.toUpperCase() + "\n" + ts.map((t) => `  • ${t.name}${t.description ? " — " + t.description : ""}`).join("\n")).join("\n\n");
+      return `${scope}\n` + Object.entries(byCat).map(([c, ts]) => c.toUpperCase() + "\n" + ts.map((t) => `  • ${t.name}${mission ? vis(t) : ""}${t.description ? " — " + t.description : ""}`).join("\n")).join("\n\n");
     },
   },
   show_tool: {
-    description: "Show a stack tool's details and credentials by name (fuzzy). No mission_key → searches the global team stack; with mission_key → searches that mission's customer stack. Credentials are returned only if your role allows it (RLS: admin, or engineer assigned to that mission).",
+    description: "Show a stack tool's full detail + credentials by name (fuzzy). No mission_key → global team stack; with mission_key → that mission's customer stack. Shows head/client visibility, who uses it, and each credential's fill status (filled value vs awaiting the client). Credentials are returned only if your role allows it (RLS: admin, or engineer assigned to that mission).",
     schema: { type: "object", properties: { name: { type: "string" }, mission_key: { type: "string" } }, required: ["name"] },
     run: async (a) => {
       let filter = "mission_id=is.null", scope = "team stack";
       if (a.mission_key) { const m = await resolveMission(a.mission_key); filter = `mission_id=eq.${m.id}`; scope = `${m.key} stack`; }
-      const tools = await api(`/rest/v1/stack_tools?select=id,name,category,description,how_to_use,url,docs_url&name=ilike.*${encodeURIComponent(a.name)}*&${filter}`);
+      const tools = await api(`/rest/v1/stack_tools?select=id,name,category,description,how_to_use,url,docs_url,visible_to_head,visible_to_client&name=ilike.*${encodeURIComponent(a.name)}*&${filter}`);
       if (!tools.length) throw new Error(`No tool matching "${a.name}" in the ${scope}.`);
       const t = tools[0];
-      const creds = await api(`/rest/v1/stack_credentials?select=label,kind,value&tool_id=eq.${t.id}&order=position.asc`).catch(() => []);
-      return `${t.name} [${t.category}]${t.description ? "\n  " + t.description : ""}${t.url ? "\n  URL: " + t.url : ""}${t.docs_url ? "\n  Docs: " + t.docs_url : ""}${t.how_to_use ? "\n\nHow to use:\n" + t.how_to_use : ""}${creds.length ? "\n\nCredentials:\n" + creds.map((c) => `  ${c.label} (${c.kind}): ${c.value}`).join("\n") : ""}`;
+      const creds = await api(`/rest/v1/stack_credentials?select=label,kind,value,instructions,filled_at,url&tool_id=eq.${t.id}&order=position.asc`).catch(() => []);
+      const users = await api(`/rest/v1/stack_tool_users?select=user:profiles!profile_id(full_name)&tool_id=eq.${t.id}`).catch(() => []);
+      const vis = []; if (t.visible_to_head) vis.push("head"); if (t.visible_to_client) vis.push("client");
+      const people = users.map((u) => u.user && u.user.full_name).filter(Boolean);
+      const cred = (c) => {
+        const filled = c.value != null && String(c.value).trim() !== "";
+        if (filled) return `  ${c.label} (${c.kind}): ${c.value}${c.url ? " [" + c.url + "]" : ""}${c.filled_at ? "  — rempli " + String(c.filled_at).slice(0, 10) : ""}`;
+        return `  ${c.label} (${c.kind}): ⏳ en attente client${c.instructions ? "  — " + c.instructions : ""}`;
+      };
+      return `${t.name} [${t.category}]`
+        + (t.description ? "\n  " + t.description : "")
+        + (t.url ? "\n  URL: " + t.url : "")
+        + (t.docs_url ? "\n  Docs: " + t.docs_url : "")
+        + (vis.length ? "\n  Visible to: " + vis.join(", ") : "")
+        + (people.length ? "\n  Utilisé par: " + people.join(", ") : "")
+        + (t.how_to_use ? "\n\nHow to use:\n" + t.how_to_use : "")
+        + (creds.length ? "\n\nCredentials:\n" + creds.map(cred).join("\n") : "");
     },
   },
 
