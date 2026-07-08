@@ -350,6 +350,37 @@ const TOOLS = {
     },
   },
 
+  // ── mission files ──
+  list_files: {
+    description: "List the files attached to a mission (by key): filename, size, type, and who can see them (head/client).",
+    schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const rows = await api(`/rest/v1/mission_files?select=filename,size_bytes,content_type,visible_to_head,visible_to_client,created_at&mission_id=eq.${m.id}&order=created_at.desc`);
+      if (!rows.length) return `${m.key}: no files.`;
+      return `${m.key} — files (${rows.length})\n` + rows.map((f) => {
+        const vis = [f.visible_to_head && "head", f.visible_to_client && "client"].filter(Boolean).join("+") || "internal";
+        return `  ${f.filename}  (${Math.max(1, Math.round(f.size_bytes / 1024))}KB · ${vis})`;
+      }).join("\n");
+    },
+  },
+  get_file: {
+    description: "Get a temporary download link for a mission file, matched by filename (fuzzy). The link expires in 5 minutes.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, filename: { type: "string" } }, required: ["mission_key", "filename"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const rows = await api(`/rest/v1/mission_files?select=filename,storage_path&mission_id=eq.${m.id}&filename=ilike.*${encodeURIComponent(a.filename)}*`);
+      if (!rows.length) throw new Error(`No file matching "${a.filename}" on ${m.key}.`);
+      if (rows.length > 1) throw new Error(`Several match: ${rows.map((r) => r.filename).join(", ")} — be more specific.`);
+      const f = rows[0];
+      const encPath = f.storage_path.split("/").map(encodeURIComponent).join("/");
+      const signed = await api(`/storage/v1/object/sign/mission-files/${encPath}`, { method: "POST", body: JSON.stringify({ expiresIn: 300 }) });
+      const url = signed && signed.signedURL ? `${URL_}/storage/v1${signed.signedURL}` : null;
+      if (!url) throw new Error("Could not create a download link.");
+      return `${f.filename} (expires in 5 min):\n${url}`;
+    },
+  },
+
   // ── mission members ──
   add_collaborator: {
     description: "Add a teammate (by name) as a collaborator on a mission. Owner/admin only (enforced by permissions).",
