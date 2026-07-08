@@ -247,7 +247,7 @@ const [, , cmd, ...args] = process.argv;
       let mission_id = null, mcolor = null; const rest = [];
       for (const w of args.slice(1)) { if (!mission_id && /^[A-Za-z]{2,5}$/.test(w)) { try { const m = await resolveMission(w); mission_id = m.id; mcolor = m.color; continue; } catch {} } rest.push(w); }
       const conf = loadConf();
-      await jsonOrDie(await authFetch(`/rest/v1/time_entries`, { method: "POST", body: JSON.stringify({ profile_id: conf.user_id, entry_date: new Date().toISOString().slice(0, 10), hours, mission_id, note: rest.join(" ") || null, source: "extra" }) }), "Log extra");
+      await jsonOrDie(await authFetch(`/rest/v1/time_entries`, { method: "POST", body: JSON.stringify({ profile_id: conf.user_id, entry_date: new Date().toISOString().slice(0, 10), hours, mission_id, note: rest.join(" ") || null, source: "manual" }) }), "Log extra");
       console.log(lime("✓ ") + `${bold(hours + "h")} extra${mcolor ? "  " + hex(mcolor, DOT) : ""}${rest.length ? "  " + white(rest.join(" ")) : ""}  ${faint("production")}`); break;
     }
 

@@ -190,7 +190,7 @@ const TOOLS = {
     run: async (a) => {
       let mission_id = null; if (a.mission_key) { try { mission_id = (await resolveMission(a.mission_key)).id; } catch {} }
       const conf = loadConf();
-      await api(`/rest/v1/time_entries`, { method: "POST", body: JSON.stringify({ profile_id: conf.user_id, entry_date: new Date().toISOString().slice(0, 10), hours: a.hours, mission_id, note: a.note || null, source: "extra" }) });
+      await api(`/rest/v1/time_entries`, { method: "POST", body: JSON.stringify({ profile_id: conf.user_id, entry_date: new Date().toISOString().slice(0, 10), hours: a.hours, mission_id, note: a.note || null, source: "manual" }) });
       return `Logged ${a.hours}h extra${a.mission_key ? " on " + a.mission_key.toUpperCase() : ""} (production).`;
     },
   },
@@ -553,11 +553,18 @@ const TOOLS = {
     run: async (a) => {
       let filter = "mission_id=is.null", scope = "TEAM STACK", mission = false;
       if (a.mission_key) { const m = await resolveMission(a.mission_key); filter = `mission_id=eq.${m.id}`; scope = `${m.key} — ${m.name} · CUSTOMER STACK`; mission = true; }
-      const rows = await api(`/rest/v1/stack_tools?select=name,category,description,visible_to_head,visible_to_client&${filter}&order=category.asc,name.asc`);
+      const rows = await api(`/rest/v1/stack_tools?select=id,name,category,description,visible_to_head,visible_to_client,monthly_cost,currency,billing_cycle&${filter}&order=category.asc,name.asc`);
       if (!rows.length) return `${scope}: empty.`;
+      const credsByTool = {};
+      if (a.with_credentials) {
+        const cr = await api(`/rest/v1/stack_credentials?select=tool_id,label,kind,value,filled_at,url&tool_id=in.(${rows.map((t) => t.id).join(",")})&order=position.asc`).catch(() => []);
+        for (const c of cr) (credsByTool[c.tool_id] = credsByTool[c.tool_id] || []).push(c);
+      }
       const vis = (t) => { const v = []; if (t.visible_to_head) v.push("head"); if (t.visible_to_client) v.push("client"); return v.length ? ` [visible: ${v.join("+")}]` : ""; };
+      const cost = (t) => (!mission && t.monthly_cost != null) ? ` — ${t.monthly_cost} ${t.currency || "EUR"}${t.billing_cycle ? "/" + t.billing_cycle : ""}` : "";
+      const credLine = (c) => { const filled = c.value != null && String(c.value).trim() !== ""; return `      ${c.label} (${c.kind}): ${filled ? c.value + (c.url ? " [" + c.url + "]" : "") : "⏳ en attente client"}`; };
       const byCat = {}; for (const t of rows) (byCat[t.category] = byCat[t.category] || []).push(t);
-      return `${scope}\n` + Object.entries(byCat).map(([c, ts]) => c.toUpperCase() + "\n" + ts.map((t) => `  • ${t.name}${mission ? vis(t) : ""}${t.description ? " — " + t.description : ""}`).join("\n")).join("\n\n");
+      return `${scope}\n` + Object.entries(byCat).map(([c, ts]) => c.toUpperCase() + "\n" + ts.map((t) => `  • ${t.name}${mission ? vis(t) : cost(t)}${t.description ? " — " + t.description : ""}` + (a.with_credentials && credsByTool[t.id] ? "\n" + credsByTool[t.id].map(credLine).join("\n") : "")).join("\n")).join("\n\n");
     },
   },
   show_tool: {
@@ -589,32 +596,38 @@ const TOOLS = {
     },
   },
   add_stack_tool: {
-    description: "Add a tool to a mission's customer stack (the client's own tools). category is one of enrichment/outbound/crm/infra/ai/other. Requires admin or an engineer assigned to the mission.",
-    schema: { type: "object", properties: { mission_key: { type: "string" }, name: { type: "string" }, category: { type: "string", enum: ["enrichment", "outbound", "crm", "infra", "ai", "other"] }, url: { type: "string" }, description: { type: "string" }, docs_url: { type: "string" }, how_to_use: { type: "string" } }, required: ["mission_key", "name", "category"] },
+    description: "Add a tool to a stack. No mission_key → the global team stack (Bulldozer's own tools — you can set monthly_cost/billing_cycle/currency). With mission_key → that mission's customer stack. category: enrichment/outbound/crm/infra/ai/other. Requires admin, or an engineer assigned to the mission.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, name: { type: "string" }, category: { type: "string", enum: ["enrichment", "outbound", "crm", "infra", "ai", "other"] }, url: { type: "string" }, description: { type: "string" }, docs_url: { type: "string" }, how_to_use: { type: "string" }, monthly_cost: { type: "number" }, billing_cycle: { type: "string", enum: ["monthly", "yearly", "one_time", "free"] }, currency: { type: "string" } }, required: ["name", "category"] },
     run: async (a) => {
-      const m = await resolveMission(a.mission_key); const conf = loadConf();
-      const payload = { mission_id: m.id, name: a.name, category: a.category, created_by: conf.user_id };
+      const conf = loadConf();
+      const payload = { name: a.name, category: a.category, created_by: conf.user_id };
+      let where = "team stack";
+      if (a.mission_key) { const m = await resolveMission(a.mission_key); payload.mission_id = m.id; where = `${m.key} stack`; }
       if (a.url) { payload.url = a.url; try { payload.favicon_url = `https://www.google.com/s2/favicons?domain=${new URL(a.url).hostname}&sz=64`; } catch {} }
       if (a.description) payload.description = a.description;
       if (a.docs_url) payload.docs_url = a.docs_url;
       if (a.how_to_use) payload.how_to_use = a.how_to_use;
+      if (a.monthly_cost != null) payload.monthly_cost = a.monthly_cost;
+      if (a.billing_cycle) payload.billing_cycle = a.billing_cycle;
+      if (a.currency) payload.currency = a.currency;
       await api(`/rest/v1/stack_tools`, { method: "POST", body: JSON.stringify(payload) });
-      return `Added ${a.name} [${a.category}] to ${m.key} — ${m.name} stack.`;
+      return `Added ${a.name} [${a.category}] to ${where}.`;
     },
   },
   add_stack_credential: {
-    description: "Add a credential to a stack tool (found by name within the mission). kind is api_key/login/password/workspace_url/token/other. Leave value empty to create a slot for the client to fill on the portal — set instructions to tell them what to paste. Requires admin or an engineer on the mission.",
-    schema: { type: "object", properties: { mission_key: { type: "string" }, tool_name: { type: "string" }, label: { type: "string" }, kind: { type: "string", enum: ["api_key", "login", "password", "workspace_url", "token", "other"] }, value: { type: "string" }, instructions: { type: "string" }, url: { type: "string" } }, required: ["mission_key", "tool_name", "label", "kind"] },
+    description: "Add a credential to a stack tool (found by name). No mission_key → searches the global team stack; with mission_key → that mission's stack. kind is api_key/login/password/workspace_url/token/other. Leave value empty on a mission tool to create a client-fill slot — set instructions. Requires admin, or an engineer on the mission.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, tool_name: { type: "string" }, label: { type: "string" }, kind: { type: "string", enum: ["api_key", "login", "password", "workspace_url", "token", "other"] }, value: { type: "string" }, instructions: { type: "string" }, url: { type: "string" } }, required: ["tool_name", "label", "kind"] },
     run: async (a) => {
-      const m = await resolveMission(a.mission_key);
-      const tools = await api(`/rest/v1/stack_tools?select=id,name&mission_id=eq.${m.id}&name=ilike.*${encodeURIComponent(a.tool_name)}*`);
-      if (!tools.length) throw new Error(`No tool matching "${a.tool_name}" in ${m.key} stack.`);
+      let filter = "mission_id=is.null", where = "team stack";
+      if (a.mission_key) { const m = await resolveMission(a.mission_key); filter = `mission_id=eq.${m.id}`; where = `${m.key} stack`; }
+      const tools = await api(`/rest/v1/stack_tools?select=id,name&${filter}&name=ilike.*${encodeURIComponent(a.tool_name)}*`);
+      if (!tools.length) throw new Error(`No tool matching "${a.tool_name}" in the ${where}.`);
       const t = tools[0];
       const payload = { tool_id: t.id, label: a.label, kind: a.kind, value: a.value || "" };
       if (a.instructions) payload.instructions = a.instructions;
       if (a.url) payload.url = a.url;
       await api(`/rest/v1/stack_credentials`, { method: "POST", body: JSON.stringify(payload) });
-      return `Added credential "${a.label}" (${a.kind}) to ${t.name} in ${m.key} stack${a.value ? "" : " — awaiting client fill"}.`;
+      return `Added credential "${a.label}" (${a.kind}) to ${t.name} in the ${where}${a.value ? "" : " — awaiting fill"}.`;
     },
   },
 
