@@ -44,6 +44,12 @@ async function resolveTask(ref) {
   const rows = await api(`/rest/v1/tasks?select=id,number,title,status,due_date,postponed_count&mission_id=eq.${mission.id}&number=eq.${m[2]}`);
   if (!rows.length) throw new Error(`No task ${m[1].toUpperCase()}-${m[2]}.`); return { ...rows[0], mission };
 }
+async function resolveAssignee(name) {
+  const rows = await api(`/rest/v1/profiles?select=id,full_name&full_name=ilike.*${encodeURIComponent(name)}*&limit=3`);
+  if (!rows.length) throw new Error(`No teammate matching "${name}".`);
+  if (rows.length > 1) throw new Error(`"${name}" matches several people (${rows.map((r) => r.full_name).join(", ")}) — be more specific.`);
+  return rows[0];
+}
 const fmtTask = (t, withKey) => `${withKey && t.missions ? t.missions.key + "-" + t.number + " " : ""}[${t.status}]${t.priority ? " " + t.priority : ""} ${t.title}${t.due_date ? " (due " + t.due_date + ")" : ""}`;
 
 // ── tools ───────────────────────────────────────────────────────────────────
@@ -91,12 +97,29 @@ const TOOLS = {
     },
   },
   add_task: {
-    description: "Create a task in a mission. priority is p1 (high) / p2 / p3; tags is an array of strings.",
-    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, priority: { type: "string", enum: ["p1", "p2", "p3"] }, tags: { type: "array", items: { type: "string" } } }, required: ["mission_key", "title"] },
+    description: "Create a task in a mission. priority p1/p2/p3; due_date YYYY-MM-DD; assignee is a teammate's name (matched fuzzily); tags is an array of strings.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, priority: { type: "string", enum: ["p1", "p2", "p3"] }, due_date: { type: "string" }, assignee: { type: "string" }, tags: { type: "array", items: { type: "string" } } }, required: ["mission_key", "title"] },
     run: async (a) => {
       const m = await resolveMission(a.mission_key); const conf = loadConf();
-      const [t] = await api(`/rest/v1/tasks`, { method: "POST", body: JSON.stringify({ mission_id: m.id, title: a.title, priority: a.priority || "p2", tags: a.tags || [], status: "todo", source: "manual", is_client_visible: false, created_by: conf.user_id }) });
-      return `Created ${m.key}-${t.number}: ${a.title}`;
+      const body = { mission_id: m.id, title: a.title, priority: a.priority || "p2", tags: a.tags || [], status: "todo", source: "manual", is_client_visible: false, created_by: conf.user_id };
+      if (a.due_date) body.due_date = a.due_date;
+      let who = ""; if (a.assignee) { const p = await resolveAssignee(a.assignee); body.assignee_id = p.id; who = ` → ${p.full_name}`; }
+      const [t] = await api(`/rest/v1/tasks`, { method: "POST", body: JSON.stringify(body) });
+      return `Created ${m.key}-${t.number}: ${a.title}${a.due_date ? " (due " + a.due_date + ")" : ""}${who}`;
+    },
+  },
+  update_task: {
+    description: "Edit an existing task by reference (e.g. TEL-12). Set any of: due_date (YYYY-MM-DD, or null to clear), priority (p1/p2/p3), title, assignee (teammate name). Only the fields you pass are changed.",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, due_date: { type: ["string", "null"] }, priority: { type: "string", enum: ["p1", "p2", "p3"] }, title: { type: "string" }, assignee: { type: "string" } }, required: ["task_ref"] },
+    run: async (a) => {
+      const t = await resolveTask(a.task_ref); const patch = {}; const changed = [];
+      if (a.due_date !== undefined) { patch.due_date = a.due_date; changed.push(a.due_date ? "due " + a.due_date : "due date cleared"); }
+      if (a.priority) { patch.priority = a.priority; changed.push(a.priority); }
+      if (a.title) { patch.title = a.title; changed.push("renamed"); }
+      if (a.assignee) { const p = await resolveAssignee(a.assignee); patch.assignee_id = p.id; changed.push("→ " + p.full_name); }
+      if (!changed.length) return "Nothing to change — pass at least one field (due_date, priority, title, assignee).";
+      await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `Updated ${t.mission.key}-${t.number}: ${changed.join(", ")}`;
     },
   },
   complete_task: {
