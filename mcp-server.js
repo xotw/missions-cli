@@ -229,10 +229,10 @@ const TOOLS = {
     description: "Your triage inbox: pending client requests and open questions awaiting a decision, with their urgency.",
     schema: { type: "object", properties: {} },
     run: async () => {
-      const reqs = await api(`/rest/v1/tasks?select=number,title,urgency,triage_status,missions!inner(key)&source=eq.client&triage_status=in.(pending,postponed)&order=urgency.desc,created_at.asc`);
+      const reqs = await api(`/rest/v1/tasks?select=number,title,urgency,triage_status,requester:profiles!created_by(full_name),missions!inner(key)&source=eq.client&triage_status=in.(pending,postponed)&order=urgency.desc,created_at.asc`);
       const heads = await api(`/rest/v1/head_asks?select=kind,title,when_text,missions:missions!head_asks_mission_id_fkey(key),head:profiles!head_asks_from_head_id_fkey(full_name)&status=eq.open&order=created_at.asc`).catch(() => []);
       const lines = [];
-      if (reqs.length) lines.push("CLIENTS (à trier):\n" + reqs.map((t) => `  ${t.missions.key}-${t.number}  [${t.urgency || "normale"}${t.triage_status === "postponed" ? ", reporté" : ""}] ${t.title}`).join("\n"));
+      if (reqs.length) lines.push("CLIENTS (à trier):\n" + reqs.map((t) => `  ${t.missions.key}-${t.number}  [${t.urgency || "normale"}${t.triage_status === "postponed" ? ", reporté" : ""}] ${t.title}${t.requester && t.requester.full_name ? "  (" + t.requester.full_name + ")" : ""}`).join("\n"));
       if (heads.length) lines.push("HEADS (demandes):\n" + heads.map((h) => `  ${h.missions ? h.missions.key : "?"}  [${h.kind}] ${h.title}${h.when_text ? " — " + h.when_text : ""}  (${h.head ? h.head.full_name : "?"})`).join("\n"));
       return lines.length ? lines.join("\n\n") : "Inbox empty — nothing to triage.";
     },
@@ -252,7 +252,7 @@ const TOOLS = {
     schema: { type: "object", properties: { task_ref: { type: "string" } }, required: ["task_ref"] },
     run: async (a) => {
       const t = await resolveTask(a.task_ref);
-      const rows = await api(`/rest/v1/tasks?select=number,title,status,priority,urgency,due_date,source,triage_status,triage_reason,is_client_visible,note,description,assignee_id&id=eq.${t.id}`);
+      const rows = await api(`/rest/v1/tasks?select=number,title,status,priority,urgency,due_date,source,triage_status,triage_reason,is_client_visible,note,description,assignee_id,requester:profiles!created_by(full_name)&id=eq.${t.id}`);
       const d = rows[0] || {};
       let assignee = "—";
       if (d.assignee_id) { const p = await api(`/rest/v1/profiles?select=full_name&id=eq.${d.assignee_id}`).catch(() => []); if (p[0]) assignee = p[0].full_name; }
@@ -261,6 +261,7 @@ const TOOLS = {
         `status: ${d.status}${d.priority ? " · " + d.priority : ""}${d.urgency && d.urgency !== "normale" ? " · urgence " + d.urgency : ""}`,
         d.due_date ? `due: ${d.due_date}` : null,
         `assignee: ${assignee}`,
+        d.requester && d.requester.full_name ? `requested by: ${d.requester.full_name}${d.source === "client" ? " (client)" : ""}` : null,
         d.source ? `source: ${d.source}` : null,
         d.triage_status && d.triage_status !== "pending" ? `triage: ${d.triage_status}${d.triage_reason ? " (" + d.triage_reason + ")" : ""}` : null,
         d.is_client_visible ? "visible to client" : null,
