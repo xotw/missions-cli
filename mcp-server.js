@@ -64,6 +64,13 @@ function parseDate(s) {
   throw new Error(`Couldn't read the date "${s}" — use YYYY-MM-DD, +Nd, today/tomorrow, or a weekday.`);
 }
 const fmtTask = (t, withKey) => `${withKey && t.missions ? t.missions.key + "-" + t.number + " " : ""}[${t.status}]${t.priority ? " " + t.priority : ""} ${t.title}${t.due_date ? " (due " + t.due_date + ")" : ""}`;
+// Indented description/note block for list views — carries the context behind a task (esp. head/customer requests).
+const fmtNotes = (t) => {
+  const out = [];
+  if (t.description && t.description.trim()) out.push("      " + t.description.trim().replace(/\n/g, "\n      "));
+  if (t.note && t.note.trim()) out.push("      (" + t.note.trim().replace(/\n/g, " ") + ")");
+  return out.length ? "\n" + out.join("\n") : "";
+};
 
 // ── tools ───────────────────────────────────────────────────────────────────
 const TOOLS = {
@@ -84,9 +91,9 @@ const TOOLS = {
     schema: { type: "object", properties: { mission_key: { type: "string" }, include_done: { type: "boolean" } }, required: ["mission_key"] },
     run: async (a) => {
       const m = await resolveMission(a.mission_key);
-      const rows = await api(`/rest/v1/tasks?select=number,title,status,due_date,priority&mission_id=eq.${m.id}${a.include_done ? "" : "&status=neq.done"}&order=status.desc,number.asc&limit=200`);
+      const rows = await api(`/rest/v1/tasks?select=number,title,status,due_date,priority,note,description&mission_id=eq.${m.id}${a.include_done ? "" : "&status=neq.done"}&order=status.desc,number.asc&limit=200`);
       if (!rows.length) return `${m.key} — ${m.name}: no ${a.include_done ? "" : "open "}tasks.`;
-      return `${m.key} — ${m.name}\n` + rows.map((t) => `  ${m.key}-${t.number}  ${fmtTask(t)}`).join("\n");
+      return `${m.key} — ${m.name}\n` + rows.map((t) => `  ${m.key}-${t.number}  ${fmtTask(t)}${fmtNotes(t)}`).join("\n");
     },
   },
   today: {
@@ -94,9 +101,9 @@ const TOOLS = {
     schema: { type: "object", properties: {} },
     run: async () => {
       const conf = loadConf(); const today = new Date().toISOString().slice(0, 10);
-      const rows = await api(`/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key)&status=neq.done&due_date=lte.${today}&assignee_id=eq.${conf.user_id}&order=due_date.asc`);
+      const rows = await api(`/rest/v1/tasks?select=number,title,status,due_date,priority,note,description,missions!inner(key)&status=neq.done&due_date=lte.${today}&assignee_id=eq.${conf.user_id}&order=due_date.asc`);
       if (!rows.length) return "Nothing assigned to you due today. (To see a mission's full board incl. unassigned work, ask for it by name.)";
-      return `Your day (${rows.length} due/overdue):\n` + rows.map((t) => "  " + fmtTask({ ...t, missions: t.missions }, true)).join("\n");
+      return `Your day (${rows.length} due/overdue):\n` + rows.map((t) => "  " + fmtTask({ ...t, missions: t.missions }, true) + fmtNotes(t)).join("\n");
     },
   },
   my_tasks: {
@@ -104,9 +111,9 @@ const TOOLS = {
     schema: { type: "object", properties: {} },
     run: async () => {
       const conf = loadConf();
-      const rows = await api(`/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key)&assignee_id=eq.${conf.user_id}&status=neq.done&order=due_date.asc.nullslast`);
+      const rows = await api(`/rest/v1/tasks?select=number,title,status,due_date,priority,note,description,missions!inner(key)&assignee_id=eq.${conf.user_id}&status=neq.done&order=due_date.asc.nullslast`);
       if (!rows.length) return "No tasks assigned to you.";
-      return `Assigned to me (${rows.length}):\n` + rows.map((t) => "  " + fmtTask({ ...t, missions: t.missions }, true)).join("\n");
+      return `Assigned to me (${rows.length}):\n` + rows.map((t) => "  " + fmtTask({ ...t, missions: t.missions }, true) + fmtNotes(t)).join("\n");
     },
   },
   add_task: {
@@ -238,6 +245,30 @@ const TOOLS = {
       const rows = await api(`/rest/v1/comments?select=body,is_question,created_at,resolved_at,author:profiles!comments_author_id_fkey(full_name)&task_id=eq.${t.id}&order=created_at.asc`);
       if (!rows.length) return `${t.mission.key}-${t.number}: no comments.`;
       return `${t.mission.key}-${t.number} — ${t.title}\n` + rows.map((c) => `  ${(c.author && c.author.full_name) || "?"}${c.is_question ? " [Q" + (c.resolved_at ? ", répondu" : "") + "]" : ""}: ${c.body}`).join("\n");
+    },
+  },
+  show_task: {
+    description: "Show one task in full — its description/notes, status, priority, urgency, due date, assignee, provenance (source) and the comment thread. Use this to read the context behind a task, especially head-of-mission and customer requests.",
+    schema: { type: "object", properties: { task_ref: { type: "string" } }, required: ["task_ref"] },
+    run: async (a) => {
+      const t = await resolveTask(a.task_ref);
+      const rows = await api(`/rest/v1/tasks?select=number,title,status,priority,urgency,due_date,source,triage_status,triage_reason,is_client_visible,note,description,assignee_id&id=eq.${t.id}`);
+      const d = rows[0] || {};
+      let assignee = "—";
+      if (d.assignee_id) { const p = await api(`/rest/v1/profiles?select=full_name&id=eq.${d.assignee_id}`).catch(() => []); if (p[0]) assignee = p[0].full_name; }
+      const comments = await api(`/rest/v1/comments?select=body,is_question,resolved_at,author:profiles!comments_author_id_fkey(full_name)&task_id=eq.${t.id}&order=created_at.asc`).catch(() => []);
+      const meta = [
+        `status: ${d.status}${d.priority ? " · " + d.priority : ""}${d.urgency && d.urgency !== "normale" ? " · urgence " + d.urgency : ""}`,
+        d.due_date ? `due: ${d.due_date}` : null,
+        `assignee: ${assignee}`,
+        d.source ? `source: ${d.source}` : null,
+        d.triage_status && d.triage_status !== "pending" ? `triage: ${d.triage_status}${d.triage_reason ? " (" + d.triage_reason + ")" : ""}` : null,
+        d.is_client_visible ? "visible to client" : null,
+      ].filter(Boolean).map((x) => "  " + x).join("\n");
+      const body = d.description && d.description.trim() ? `\n\nDescription:\n${d.description.trim()}` : "";
+      const provenance = d.note && d.note.trim() ? `\n\nNote: ${d.note.trim()}` : "";
+      const thread = comments.length ? "\n\nComments:\n" + comments.map((c) => `  ${(c.author && c.author.full_name) || "?"}${c.is_question ? " [Q" + (c.resolved_at ? ", répondu" : "") + "]" : ""}: ${c.body}`).join("\n") : "";
+      return `${t.mission.key}-${d.number} — ${d.title}\n${meta}${body}${provenance}${thread}`;
     },
   },
   accept_request: {
