@@ -548,21 +548,25 @@ const TOOLS = {
 
   // ── stack (tool registry) ──
   list_stack: {
-    description: "List the team's tool stack, grouped by category.",
-    schema: { type: "object", properties: {} },
-    run: async () => {
-      const rows = await api(`/rest/v1/stack_tools?select=name,category,description&order=category.asc,name.asc`);
-      if (!rows.length) return "Stack is empty.";
+    description: "List a tool stack, grouped by category. No argument → the global team stack (Bulldozer's own tools). With mission_key → that mission's customer stack (the tools the client uses).",
+    schema: { type: "object", properties: { mission_key: { type: "string" } } },
+    run: async (a) => {
+      let filter = "mission_id=is.null", scope = "TEAM STACK";
+      if (a.mission_key) { const m = await resolveMission(a.mission_key); filter = `mission_id=eq.${m.id}`; scope = `${m.key} — ${m.name} · CUSTOMER STACK`; }
+      const rows = await api(`/rest/v1/stack_tools?select=name,category,description&${filter}&order=category.asc,name.asc`);
+      if (!rows.length) return `${scope}: empty.`;
       const byCat = {}; for (const t of rows) (byCat[t.category] = byCat[t.category] || []).push(t);
-      return Object.entries(byCat).map(([c, ts]) => c.toUpperCase() + "\n" + ts.map((t) => `  • ${t.name}${t.description ? " — " + t.description : ""}`).join("\n")).join("\n\n");
+      return `${scope}\n` + Object.entries(byCat).map(([c, ts]) => c.toUpperCase() + "\n" + ts.map((t) => `  • ${t.name}${t.description ? " — " + t.description : ""}`).join("\n")).join("\n\n");
     },
   },
   show_tool: {
-    description: "Show a stack tool's details and credentials by name (fuzzy). Credentials are visible to engineers/admin only (enforced by permissions).",
-    schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+    description: "Show a stack tool's details and credentials by name (fuzzy). No mission_key → searches the global team stack; with mission_key → searches that mission's customer stack. Credentials are returned only if your role allows it (RLS: admin, or engineer assigned to that mission).",
+    schema: { type: "object", properties: { name: { type: "string" }, mission_key: { type: "string" } }, required: ["name"] },
     run: async (a) => {
-      const tools = await api(`/rest/v1/stack_tools?select=id,name,category,description,how_to_use,url,docs_url&name=ilike.*${encodeURIComponent(a.name)}*`);
-      if (!tools.length) throw new Error(`No tool matching "${a.name}".`);
+      let filter = "mission_id=is.null", scope = "team stack";
+      if (a.mission_key) { const m = await resolveMission(a.mission_key); filter = `mission_id=eq.${m.id}`; scope = `${m.key} stack`; }
+      const tools = await api(`/rest/v1/stack_tools?select=id,name,category,description,how_to_use,url,docs_url&name=ilike.*${encodeURIComponent(a.name)}*&${filter}`);
+      if (!tools.length) throw new Error(`No tool matching "${a.name}" in the ${scope}.`);
       const t = tools[0];
       const creds = await api(`/rest/v1/stack_credentials?select=label,kind,value&tool_id=eq.${t.id}&order=position.asc`).catch(() => []);
       return `${t.name} [${t.category}]${t.description ? "\n  " + t.description : ""}${t.url ? "\n  URL: " + t.url : ""}${t.docs_url ? "\n  Docs: " + t.docs_url : ""}${t.how_to_use ? "\n\nHow to use:\n" + t.how_to_use : ""}${creds.length ? "\n\nCredentials:\n" + creds.map((c) => `  ${c.label} (${c.kind}): ${c.value}`).join("\n") : ""}`;
