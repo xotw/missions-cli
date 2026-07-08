@@ -12,19 +12,37 @@ const ANON = "sb_publishable_2Q-FEPM5qK-flJaqHzE8hg_CvG9I6LM"; // public by desi
 const CONF_DIR = path.join(os.homedir(), ".config", "msn");
 const CONF = path.join(CONF_DIR, "config.json");
 
-const dim = (s) => `\x1b[2m${s}\x1b[0m`;
-const bold = (s) => `\x1b[1m${s}\x1b[0m`;
-const red = (s) => `\x1b[31m${s}\x1b[0m`;
-const lime = (s) => `\x1b[92m${s}\x1b[0m`;
-const STATUS_GLYPH = { todo: "○", doing: "◐", done: lime("●") };
+// ── palette ───────────────────────────────────────────────────────────────
+const R = "\x1b[0m";
+const dim = (s) => `\x1b[2m${s}${R}`;
+const bold = (s) => `\x1b[1m${s}${R}`;
+const red = (s) => `\x1b[38;5;203m${s}${R}`;
+const amber = (s) => `\x1b[38;5;215m${s}${R}`;
+const lime = (s) => `\x1b[38;2;198;236;60m${s}${R}`;
+const grey = (s) => `\x1b[38;5;245m${s}${R}`;
+const faint = (s) => `\x1b[38;5;239m${s}${R}`;
+const white = (s) => `\x1b[38;5;253m${s}${R}`;
+const hex = (h, s) => {
+  const m = (h || "#888888").replace("#", "");
+  const rgb = [0, 2, 4].map((i) => parseInt(m.slice(i, i + 2), 16) || 136);
+  return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${s}${R}`;
+};
+const strip = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, "");
+const vlen = (s) => strip(s).length;
+const padE = (s, n) => s + " ".repeat(Math.max(0, n - vlen(s)));
+const padS = (s, n) => " ".repeat(Math.max(0, n - vlen(s))) + s;
+const DOT = "●";
+const GLYPH = { todo: grey("○"), doing: amber("◐"), done: lime("●") };
+const PRIO = { p1: red("▰▰▰"), p2: amber("▰▰") + faint("▱"), p3: faint("▰▱▱") };
 
-function loadConf() {
-  try { return JSON.parse(fs.readFileSync(CONF, "utf8")); } catch { return null; }
+function header(title, sub) {
+  console.log("\n" + `${lime("▌")} ${bold(white(title))}` + (sub ? `  ${dim(sub)}` : ""));
+  console.log(faint("─".repeat(46)));
 }
-function saveConf(c) {
-  fs.mkdirSync(CONF_DIR, { recursive: true });
-  fs.writeFileSync(CONF, JSON.stringify(c, null, 2), { mode: 0o600 });
-}
+function groupHead(label, n) { console.log(`${faint("┃")} ${grey(label.toUpperCase())} ${dim(String(n))}`); }
+
+function loadConf() { try { return JSON.parse(fs.readFileSync(CONF, "utf8")); } catch { return null; } }
+function saveConf(c) { fs.mkdirSync(CONF_DIR, { recursive: true }); fs.writeFileSync(CONF, JSON.stringify(c, null, 2), { mode: 0o600 }); }
 
 function ask(q, { hidden = false } = {}) {
   return new Promise((res) => {
@@ -34,23 +52,16 @@ function ask(q, { hidden = false } = {}) {
     }
     const stdin = process.stdin;
     process.stdout.write(q);
-    stdin.resume();
-    stdin.setEncoding("utf8");
-    const rawCapable = stdin.isTTY && typeof stdin.setRawMode === "function";
-    if (rawCapable) stdin.setRawMode(true);
+    stdin.resume(); stdin.setEncoding("utf8");
+    const raw = stdin.isTTY && typeof stdin.setRawMode === "function";
+    if (raw) stdin.setRawMode(true);
     let buf = "";
-    const finish = () => {
-      if (rawCapable) stdin.setRawMode(false);
-      stdin.pause();
-      stdin.removeListener("data", onData);
-      process.stdout.write("\n");
-      res(buf.trim());
-    };
+    const finish = () => { if (raw) stdin.setRawMode(false); stdin.pause(); stdin.removeListener("data", onData); process.stdout.write("\n"); res(buf.trim()); };
     const onData = (chunk) => {
       for (const c of chunk.toString()) {
-        if (c === "\n" || c === "\r" || c === "\u0004") return finish();
-        if (c === "\u0003") { if (rawCapable) stdin.setRawMode(false); process.stdout.write("\n"); process.exit(1); }
-        else if (c === "\u007f" || c === "\b") buf = buf.slice(0, -1);
+        if (c === "\n" || c === "\r" || c === "") return finish();
+        if (c === "") { if (raw) stdin.setRawMode(false); process.stdout.write("\n"); process.exit(1); }
+        else if (c === "" || c === "\b") buf = buf.slice(0, -1);
         else if (c >= " ") buf += c;
       }
     };
@@ -63,80 +74,54 @@ async function authFetch(pathname, opts = {}, retry = true) {
   if (!conf?.access_token) die("Not logged in. Run: msn login");
   const r = await fetch(URL_ + pathname, {
     ...opts,
-    headers: {
-      apikey: ANON,
-      Authorization: `Bearer ${conf.access_token}`,
-      "Content-Type": "application/json",
-      Prefer: opts.method === "POST" || opts.method === "PATCH" ? "return=representation" : undefined,
-      ...(opts.headers || {}),
-    },
+    headers: { apikey: ANON, Authorization: `Bearer ${conf.access_token}`, "Content-Type": "application/json",
+      Prefer: opts.method === "POST" || opts.method === "PATCH" ? "return=representation" : undefined, ...(opts.headers || {}) },
   });
   if (r.status === 401 && retry && conf.refresh_token) {
-    const ok = await refresh(conf);
-    if (ok) return authFetch(pathname, opts, false);
+    if (await refresh(conf)) return authFetch(pathname, opts, false);
     die("Session expired. Run: msn login");
   }
   return r;
 }
-
 async function refresh(conf) {
   const r = await fetch(`${URL_}/auth/v1/token?grant_type=refresh_token`, {
-    method: "POST",
-    headers: { apikey: ANON, "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: conf.refresh_token }),
-  });
+    method: "POST", headers: { apikey: ANON, "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: conf.refresh_token }) });
   if (!r.ok) return false;
-  const j = await r.json();
-  saveConf({ ...conf, access_token: j.access_token, refresh_token: j.refresh_token });
-  return true;
+  const j = await r.json(); saveConf({ ...conf, access_token: j.access_token, refresh_token: j.refresh_token }); return true;
 }
-
-function die(msg) { console.error(red(msg)); process.exit(1); }
-
-async function jsonOrDie(r, what) {
-  if (!r.ok) {
-    let detail = "";
-    try { detail = (await r.json()).message || ""; } catch {}
-    die(`${what} failed (HTTP ${r.status})${detail ? ": " + detail : ""}`);
-  }
-  return r.json();
-}
+function die(msg) { console.error(red("✗ ") + msg); process.exit(1); }
+async function jsonOrDie(r, what) { if (!r.ok) { let d = ""; try { d = (await r.json()).message || ""; } catch {} die(`${what} failed (HTTP ${r.status})${d ? ": " + d : ""}`); } return r.json(); }
 
 async function resolveMission(key) {
-  const r = await authFetch(`/rest/v1/missions?select=id,key,name&key=ilike.${encodeURIComponent(key)}`);
+  const r = await authFetch(`/rest/v1/missions?select=id,key,name,color&key=ilike.${encodeURIComponent(key)}`);
   const rows = await jsonOrDie(r, "Mission lookup");
-  if (!rows.length) die(`No mission with key "${key.toUpperCase()}" (or no access).`);
-  return rows[0];
+  if (!rows.length) die(`No mission with key "${key.toUpperCase()}" (or no access).`); return rows[0];
 }
-
 async function resolveTask(ref) {
-  const m = ref.match(/^([A-Za-z]{2,5})-(\d+)$/);
-  if (!m) die(`Invalid task ref "${ref}" — expected like TEL-12`);
+  const m = ref.match(/^([A-Za-z]{2,5})-(\d+)$/); if (!m) die(`Invalid task ref "${ref}" — expected like TEL-12`);
   const mission = await resolveMission(m[1]);
   const r = await authFetch(`/rest/v1/tasks?select=id,number,title,status,due_date,postponed_count&mission_id=eq.${mission.id}&number=eq.${m[2]}`);
-  const rows = await jsonOrDie(r, "Task lookup");
-  if (!rows.length) die(`No task ${m[1].toUpperCase()}-${m[2]} (or no access).`);
-  return { ...rows[0], mission };
+  const rows = await jsonOrDie(r, "Task lookup"); if (!rows.length) die(`No task ${m[1].toUpperCase()}-${m[2]}.`); return { ...rows[0], mission };
 }
 
 function fmtDate(d) {
-  if (!d) return "";
-  const dt = new Date(d + "T00:00:00");
-  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (!d) return dim("—");
+  const dt = new Date(d + "T00:00:00"); const t = new Date(); t.setHours(0, 0, 0, 0);
   const s = dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  return dt < today ? red(s) : dt.getTime() === today.getTime() ? lime(s) : dim(s);
+  return dt < t ? red(s) : dt.getTime() === t.getTime() ? lime(s) : dim(s);
 }
-
-function printTasks(rows, { withMission = false } = {}) {
-  if (!rows.length) return console.log(dim("  nothing here."));
-  for (const t of rows) {
-    const key = withMission && t.missions ? dim(`${t.missions.key}-${t.number}`.padEnd(8)) : dim(String(t.number).padStart(3) + " ");
-    const glyph = STATUS_GLYPH[t.status] || "○";
-    const title = t.status === "done" ? dim(t.title) : t.title;
-    const prio = t.priority === "p1" ? red("!1 ") : t.priority === "p2" ? "!2 " : "";
-    console.log(`  ${key} ${glyph}  ${prio}${title} ${fmtDate(t.due_date)}`);
-  }
+function taskRow(t, o = {}) {
+  const withMission = o.withMission;
+  const key = t.missions ? `${t.missions.key}-${t.number}` : `${t.number}`;
+  const dotM = t.missions && t.missions.color ? hex(t.missions.color, DOT) + " " : "";
+  const prio = PRIO[t.priority] || faint("▰▱▱");
+  const title = t.status === "done" ? dim(t.title) : white(t.title);
+  const right = withMission && t.missions ? `${dim(t.missions.key)} ${padS(fmtDate(t.due_date), 6)}` : padS(fmtDate(t.due_date), 6);
+  const left = `  ${dim(padE(key, 8))} ${prio}  ${GLYPH[t.status] || GLYPH.todo} ${dotM}${title}`;
+  const gap = Math.max(2, 74 - vlen(left) - vlen(right));
+  console.log(left + " ".repeat(gap) + right);
 }
+function printTasks(rows, o = {}) { if (!rows.length) return console.log(dim("  —")); for (const t of rows) taskRow(t, o); }
 
 const [, , cmd, ...args] = process.argv;
 
@@ -144,249 +129,149 @@ const [, , cmd, ...args] = process.argv;
   switch (cmd) {
     case "login": {
       if (args[0] === "--paste") {
-        console.log(dim("In the app's browser tab: DevTools → Application → Local Storage →\n" +
-          "copy the value of the key starting 'sb-' and ending '-auth-token', then paste it here."));
-        const raw = (await ask("paste session: ")).trim();
-        let sess;
-        try {
-          let v = raw;
-          const parsed = JSON.parse(v);
-          // supabase stores either the session object directly, or [session] / {currentSession}
-          sess = parsed.access_token ? parsed : parsed.currentSession || parsed[0] || parsed;
-        } catch { die("Could not parse — paste the full JSON value of the sb-…-auth-token key."); }
-        if (!sess?.access_token) die("No access_token found in what you pasted.");
-        saveConf({ email: sess.user?.email || "session", access_token: sess.access_token,
-          refresh_token: sess.refresh_token, user_id: sess.user?.id });
-        // verify it works
-        const chk = await authFetch(`/rest/v1/profiles?select=full_name,role&id=eq.${sess.user?.id}`, {}, false);
-        const who = chk.ok ? (await chk.json())[0] : null;
-        console.log(lime(`Logged in`) + (who ? ` as ${who.full_name || sess.user?.email} (${who.role})` : ""));
-        break;
+        console.log(dim("DevTools → Application → Local Storage → copy the sb-…-auth-token value, paste here."));
+        const raw = (await ask("paste session: ")).trim(); let sess;
+        try { const p = JSON.parse(raw); sess = p.access_token ? p : p.currentSession || p[0] || p; } catch { die("Could not parse the pasted value."); }
+        if (!sess || !sess.access_token) die("No access_token in what you pasted.");
+        saveConf({ email: (sess.user && sess.user.email) || "session", access_token: sess.access_token, refresh_token: sess.refresh_token, user_id: sess.user && sess.user.id });
+        console.log(lime("✓ ") + "Logged in"); break;
       }
       const email = (args[0] || (await ask("email: "))).trim();
       const password = await ask("password: ", { hidden: true });
-      const r = await fetch(`${URL_}/auth/v1/token?grant_type=password`, {
-        method: "POST",
-        headers: { apikey: ANON, "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      if (!r.ok) {
-        let body = {};
-        try { body = await r.json(); } catch {}
-        die(`Login failed (HTTP ${r.status}) — ${body.error_code || body.error || ""}: ${body.msg || body.error_description || body.message || "no detail"}`);
-      }
-      const j = await r.json();
-      saveConf({ email, access_token: j.access_token, refresh_token: j.refresh_token, user_id: j.user.id });
-      console.log(lime(`Logged in as ${email}`));
-      break;
+      const r = await fetch(`${URL_}/auth/v1/token?grant_type=password`, { method: "POST", headers: { apikey: ANON, "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+      if (!r.ok) { let b = {}; try { b = await r.json(); } catch {} die(`Login failed (HTTP ${r.status}) — ${b.error_code || b.error || ""}: ${b.msg || b.message || "no detail"}`); }
+      const j = await r.json(); saveConf({ email, access_token: j.access_token, refresh_token: j.refresh_token, user_id: j.user.id });
+      console.log(lime("✓ ") + `Logged in as ${bold(email)}`); break;
     }
 
     case "today": {
       const today = new Date().toISOString().slice(0, 10);
-      const r = await authFetch(
-        `/rest/v1/tasks?select=number,title,status,due_date,priority,today_order,missions!inner(key,kind)` +
-        `&status=neq.done&due_date=lte.${today}&order=today_order.asc.nullslast,due_date.asc`);
+      const r = await authFetch(`/rest/v1/tasks?select=number,title,status,due_date,priority,today_order,missions!inner(key,color)&status=neq.done&due_date=lte.${today}&order=today_order.asc.nullslast,due_date.asc`);
       const rows = await jsonOrDie(r, "Today");
-      console.log(bold(`Today — ${rows.length} open`));
-      printTasks(rows, { withMission: true });
-      break;
-    }
-
-    case "ls": {
-      if (!args[0]) die("Usage: msn ls <mission-key> [--all]");
-      const mission = await resolveMission(args[0]);
-      const all = args.includes("--all");
-      const r = await authFetch(
-        `/rest/v1/tasks?select=number,title,status,due_date,priority&mission_id=eq.${mission.id}` +
-        (all ? "" : "&status=neq.done") + `&order=status.desc,number.asc&limit=100`);
-      const rows = await jsonOrDie(r, "List");
-      console.log(bold(`${mission.key} — ${mission.name}`));
-      printTasks(rows.map((t) => ({ ...t })));
-      if (!all) {
-        const rc = await authFetch(`/rest/v1/tasks?select=id&mission_id=eq.${mission.id}&status=eq.done`, { headers: { Prefer: "count=exact", Range: "0-0" } });
-        const total = rc.headers.get("content-range")?.split("/")[1];
-        if (total && total !== "0") console.log(dim(`  + ${total} done (msn ls ${mission.key} --all)`));
-      }
-      break;
-    }
-
-    case "add": {
-      if (args.length < 2) die('Usage: msn add <mission-key> "title" [!1|!2|!3] [#tag ...]');
-      const mission = await resolveMission(args[0]);
-      let priority = "p2"; const tags = []; const words = [];
-      for (const w of args.slice(1)) {
-        if (/^!(1|2|3)$/.test(w)) priority = "p" + w[1];
-        else if (w.startsWith("#") && w.length > 1) tags.push(w.slice(1));
-        else words.push(w);
-      }
-      const title = words.join(" ").trim();
-      if (!title) die("Empty title.");
-      const conf = loadConf();
-      const r = await authFetch(`/rest/v1/tasks`, {
-        method: "POST",
-        body: JSON.stringify({ mission_id: mission.id, title, priority, tags, status: "todo", source: "manual", is_client_visible: false, created_by: conf.user_id }),
-      });
-      const [t] = await jsonOrDie(r, "Create");
-      console.log(lime(`✓ ${mission.key}-${t.number}`) + `  ${title}`);
-      break;
-    }
-
-    case "done":
-    case "start": {
-      if (!args[0]) die(`Usage: msn ${cmd} <KEY-n>`);
-      const t = await resolveTask(args[0]);
-      const patch = cmd === "done" ? { status: "done", done_at: new Date().toISOString() } : { status: "doing" };
-      const r = await authFetch(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify(patch) });
-      await jsonOrDie(r, "Update");
-      console.log(`${cmd === "done" ? lime("● done") : "◐ doing"}  ${t.mission.key}-${t.number}  ${t.title}`);
-      break;
-    }
-
-    case "postpone": {
-      if (args.length < 2) die("Usage: msn postpone <KEY-n> <+3d | 2026-07-12 | monday>");
-      const t = await resolveTask(args[0]);
-      let target;
-      const rel = args[1].match(/^\+(\d+)d$/);
-      if (rel) { const d = new Date(); d.setDate(d.getDate() + Number(rel[1])); target = d.toISOString().slice(0, 10); }
-      else if (/^\d{4}-\d{2}-\d{2}$/.test(args[1])) target = args[1];
-      else if (args[1] === "monday") { const d = new Date(); d.setDate(d.getDate() + (((1 - d.getDay() + 7) % 7) || 7)); target = d.toISOString().slice(0, 10); }
-      else die("Date must be +Nd, YYYY-MM-DD, or monday");
-      const r = await authFetch(`/rest/v1/tasks?id=eq.${t.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ due_date: target, postponed_count: (t.postponed_count ?? 0) + 1 }),
-      });
-      await jsonOrDie(r, "Postpone");
-      console.log(`→ ${t.mission.key}-${t.number} postponed to ${target}`);
-      break;
-    }
-
-    case "ms":
-    case "missions": {
-      const kindOf = { client: "Missions", internal: "Interne", team: "Équipe" };
-      const r = await authFetch(`/rest/v1/missions?select=key,name,kind,status,mission_type&order=kind.asc,key.asc`);
-      const rows = await jsonOrDie(r, "Missions");
-      for (const kind of ["client", "internal", "team"]) {
-        const group = rows.filter((m) => m.kind === kind);
-        if (!group.length) continue;
-        console.log(bold(kindOf[kind]));
-        for (const m of group) {
-          const t = (m.kind === "client" && m.mission_type) ? dim(` ${m.mission_type}`) : "";
-          const st = m.status !== "active" ? dim(` (${m.status})`) : "";
-          console.log(`  ${dim(m.key.padEnd(5))} ${m.name}${t}${st}`);
-        }
-      }
-      break;
+      const overdue = rows.filter((t) => t.due_date < today).length;
+      header("Today", new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" }) + `  ·  ${rows.length} open` + (overdue ? `  ·  ${overdue} overdue` : ""));
+      printTasks(rows, { withMission: true }); console.log(); break;
     }
 
     case "mine": {
       const conf = loadConf();
-      const r = await authFetch(
-        `/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key)` +
-        `&assignee_id=eq.${conf.user_id}&status=neq.done&order=due_date.asc.nullslast`);
-      const rows = await jsonOrDie(r, "Mine");
-      console.log(bold(`Assigned to me — ${rows.length} open`));
-      printTasks(rows, { withMission: true });
-      break;
+      const r = await authFetch(`/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key,color)&assignee_id=eq.${conf.user_id}&status=neq.done&order=due_date.asc.nullslast`);
+      const rows = await jsonOrDie(r, "Mine"); header("Assigned to me", `${rows.length} open`); printTasks(rows, { withMission: true }); console.log(); break;
     }
 
     case "week": {
-      const now = new Date(); const day = now.getDay() || 7;
-      const mon = new Date(now); mon.setDate(now.getDate() - (day - 1));
-      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
-      const iso = (d) => d.toISOString().slice(0, 10);
-      const r = await authFetch(
-        `/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key)` +
-        `&status=neq.done&due_date=gte.${iso(mon)}&due_date=lte.${iso(sun)}&order=due_date.asc`);
-      const rows = await jsonOrDie(r, "Week");
-      const byDay = {};
-      for (const t of rows) (byDay[t.due_date] ??= []).push(t);
-      console.log(bold(`This week — ${rows.length} tasks`));
-      for (let i = 0; i < 7; i++) {
-        const d = new Date(mon); d.setDate(mon.getDate() + i); const k = iso(d);
-        const label = d.toLocaleDateString("en-US", { weekday: "short", day: "numeric" });
-        if (byDay[k]?.length) { console.log(bold("\n" + label)); printTasks(byDay[k], { withMission: true }); }
-      }
-      break;
+      const now = new Date(); const day = now.getDay() || 7; const mon = new Date(now); mon.setDate(now.getDate() - (day - 1));
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 6); const iso = (d) => d.toISOString().slice(0, 10);
+      const r = await authFetch(`/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key,color)&status=neq.done&due_date=gte.${iso(mon)}&due_date=lte.${iso(sun)}&order=due_date.asc`);
+      const rows = await jsonOrDie(r, "Week"); const byDay = {}; for (const t of rows) (byDay[t.due_date] = byDay[t.due_date] || []).push(t);
+      header("This week", `${iso(mon).slice(5)} → ${iso(sun).slice(5)}  ·  ${rows.length} tasks`);
+      for (let i = 0; i < 7; i++) { const d = new Date(mon); d.setDate(mon.getDate() + i); const k = iso(d);
+        if (byDay[k] && byDay[k].length) { groupHead(d.toLocaleDateString("en-US", { weekday: "short", day: "numeric" }), byDay[k].length); printTasks(byDay[k], { withMission: true }); } }
+      console.log(); break;
     }
 
-    case "new": {
-      if (args.length < 2) die('Usage: msn new <client|internal|team> "Name" [KEY]');
-      const kind = args[0];
-      if (!["client", "internal", "team"].includes(kind)) die("Kind must be client, internal, or team.");
-      const name = args[1];
-      const key = (args[2] || name.replace(/[^a-zA-Z]/g, "").slice(0, 3)).toUpperCase();
-      const colors = ["#DDFF56", "#7DD3FC", "#F0ABFC", "#FCA5A5", "#FDBA74"];
-      const payload = { name, key, kind, color: colors[Math.floor(name.length % colors.length)], status: "active",
-        visibility: kind === "team" ? "team" : "private" };
-      if (kind === "client") payload.mission_type = "custom_build";
-      const r = await authFetch(`/rest/v1/rpc/create_mission`, { method: "POST", body: JSON.stringify({ _payload: payload }) });
-      const out = await jsonOrDie(r, "Create mission");
-      const m = Array.isArray(out) ? out[0] : out;
-      console.log(lime(`✓ ${m?.key || key}`) + `  ${name}  ${dim(kind)}`);
-      break;
+    case "ls": {
+      if (!args[0]) die("Usage: msn ls <KEY> [--all]");
+      const mission = await resolveMission(args[0]); const all = args.includes("--all");
+      const r = await authFetch(`/rest/v1/tasks?select=number,title,status,due_date,priority&mission_id=eq.${mission.id}${all ? "" : "&status=neq.done"}&order=status.desc,number.asc&limit=100`);
+      const rows = await jsonOrDie(r, "List");
+      header(`${hex(mission.color, DOT)} ${mission.key} — ${mission.name}`, `${rows.length} ${all ? "tasks" : "open"}`);
+      for (const s of ["doing", "todo", "done"]) { const g = rows.filter((t) => t.status === s); if (g.length) { groupHead(s, g.length); printTasks(g.map((t) => ({ ...t, missions: null }))); } }
+      console.log(); break;
     }
 
-    case "extra": {
-      if (args.length < 1) die('Usage: msn extra <hours> [KEY] "note"');
-      const hours = parseFloat(args[0]);
-      if (!(hours > 0)) die("Hours must be a positive number.");
-      let mission_id = null; const rest = [];
-      for (const w of args.slice(1)) {
-        if (!mission_id && /^[A-Za-z]{2,5}$/.test(w) && !w.includes(" ")) {
-          try { mission_id = (await resolveMission(w)).id; continue; } catch {}
-        }
-        rest.push(w);
-      }
-      const conf = loadConf();
-      const r = await authFetch(`/rest/v1/time_entries`, {
-        method: "POST",
-        body: JSON.stringify({ profile_id: conf.user_id, entry_date: new Date().toISOString().slice(0, 10),
-          hours, mission_id, note: rest.join(" ") || null, source: "extra" }),
-      });
-      await jsonOrDie(r, "Log extra");
-      console.log(lime(`✓ ${hours}h extra`) + (rest.length ? `  ${rest.join(" ")}` : "") + dim("  (production)"));
-      break;
+    case "ms": case "missions": {
+      const kindOf = { client: "Missions", internal: "Interne", team: "Équipe" };
+      const r = await authFetch(`/rest/v1/missions?select=key,name,kind,status,mission_type,color&order=kind.asc,key.asc`);
+      const rows = await jsonOrDie(r, "Missions"); header("Projets", `${rows.length} total`);
+      for (const kind of ["client", "internal", "team"]) { const g = rows.filter((m) => m.kind === kind); if (!g.length) continue;
+        groupHead(kindOf[kind], g.length);
+        for (const m of g) { const type = kind === "client" && m.mission_type ? faint(` ${m.mission_type}`) : "";
+          const st = m.status !== "active" ? faint(` (${m.status})`) : "";
+          console.log(`  ${hex(m.color, DOT)} ${dim(padE(m.key, 6))} ${white(m.name)}${type}${st}`); } }
+      console.log(); break;
+    }
+
+    case "add": {
+      if (args.length < 2) die('Usage: msn add <KEY> "title" [!1|!2|!3] [#tag ...]');
+      const mission = await resolveMission(args[0]); let priority = "p2"; const tags = []; const words = [];
+      for (const w of args.slice(1)) { if (/^!(1|2|3)$/.test(w)) priority = "p" + w[1]; else if (w.startsWith("#") && w.length > 1) tags.push(w.slice(1)); else words.push(w); }
+      const title = words.join(" ").trim(); if (!title) die("Empty title."); const conf = loadConf();
+      const r = await authFetch(`/rest/v1/tasks`, { method: "POST", body: JSON.stringify({ mission_id: mission.id, title, priority, tags, status: "todo", source: "manual", is_client_visible: false, created_by: conf.user_id }) });
+      const created = await jsonOrDie(r, "Create"); const t = created[0];
+      console.log(lime("✓ ") + `${hex(mission.color, DOT)} ${bold(mission.key + "-" + t.number)}  ${white(title)}  ${PRIO[priority]}`); break;
+    }
+
+    case "done": case "start": {
+      if (!args[0]) die(`Usage: msn ${cmd} <KEY-n>`);
+      const t = await resolveTask(args[0]); const patch = cmd === "done" ? { status: "done", done_at: new Date().toISOString() } : { status: "doing" };
+      await jsonOrDie(await authFetch(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify(patch) }), "Update");
+      console.log((cmd === "done" ? lime("● done  ") : amber("◐ doing ")) + `${dim(t.mission.key + "-" + t.number)}  ${white(t.title)}`); break;
+    }
+
+    case "postpone": {
+      if (args.length < 2) die("Usage: msn postpone <KEY-n> <+3d|monday|YYYY-MM-DD>");
+      const t = await resolveTask(args[0]); let tgt; const rel = args[1].match(/^\+(\d+)d$/);
+      if (rel) { const d = new Date(); d.setDate(d.getDate() + +rel[1]); tgt = d.toISOString().slice(0, 10); }
+      else if (/^\d{4}-\d{2}-\d{2}$/.test(args[1])) tgt = args[1];
+      else if (args[1] === "monday") { const d = new Date(); d.setDate(d.getDate() + (((1 - d.getDay() + 7) % 7) || 7)); tgt = d.toISOString().slice(0, 10); }
+      else die("Date must be +Nd, YYYY-MM-DD, or monday");
+      await jsonOrDie(await authFetch(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ due_date: tgt, postponed_count: (t.postponed_count || 0) + 1 }) }), "Postpone");
+      console.log(amber("→ ") + `${dim(t.mission.key + "-" + t.number)} ${white(t.title)}  ${dim("→")} ${lime(tgt)}`); break;
     }
 
     case "comment": {
       if (args.length < 2) die('Usage: msn comment <KEY-n> "text" [--question]');
-      const t = await resolveTask(args[0]);
-      const isQ = args.includes("--question");
-      const body = args.slice(1).filter((w) => w !== "--question").join(" ");
-      const conf = loadConf();
-      const r = await authFetch(`/rest/v1/comments`, {
-        method: "POST",
-        body: JSON.stringify({ task_id: t.id, body, author_id: conf.user_id, is_question: isQ }),
-      });
-      await jsonOrDie(r, "Comment");
-      console.log(`${isQ ? "?" : "💬"} ${t.mission.key}-${t.number}  ${body}`);
-      break;
+      const t = await resolveTask(args[0]); const isQ = args.includes("--question");
+      const body = args.slice(1).filter((w) => w !== "--question").join(" "); const conf = loadConf();
+      await jsonOrDie(await authFetch(`/rest/v1/comments`, { method: "POST", body: JSON.stringify({ task_id: t.id, body, author_id: conf.user_id, is_question: isQ }) }), "Comment");
+      console.log((isQ ? amber("? ") : lime("✓ ")) + `${dim(t.mission.key + "-" + t.number)}  ${body}`); break;
     }
 
-    case "whoami": {
-      const conf = loadConf();
-      if (!conf) die("Not logged in.");
-      console.log(conf.email);
-      break;
+    case "new": {
+      if (args.length < 2) die('Usage: msn new <client|internal|team> "Name" [KEY]');
+      const kind = args[0]; if (!["client", "internal", "team"].includes(kind)) die("Kind must be client, internal, or team.");
+      const name = args[1]; const key = (args[2] || name.replace(/[^a-zA-Z]/g, "").slice(0, 3)).toUpperCase();
+      const colors = ["#DDFF56", "#7DD3FC", "#F0ABFC", "#FCA5A5", "#FDBA74"]; const color = colors[name.length % colors.length];
+      const payload = { name, key, kind, color, status: "active", visibility: kind === "team" ? "team" : "private" };
+      if (kind === "client") payload.mission_type = "custom_build";
+      const out = await jsonOrDie(await authFetch(`/rest/v1/rpc/create_mission`, { method: "POST", body: JSON.stringify({ _payload: payload }) }), "Create mission");
+      const m = Array.isArray(out) ? out[0] : out;
+      console.log(lime("✓ ") + `${hex(color, DOT)} ${bold((m && m.key) || key)}  ${white(name)}  ${faint(kind)}`); break;
     }
+
+    case "extra": {
+      if (args.length < 1) die('Usage: msn extra <hours> [KEY] "note"');
+      const hours = parseFloat(args[0]); if (!(hours > 0)) die("Hours must be positive.");
+      let mission_id = null, mcolor = null; const rest = [];
+      for (const w of args.slice(1)) { if (!mission_id && /^[A-Za-z]{2,5}$/.test(w)) { try { const m = await resolveMission(w); mission_id = m.id; mcolor = m.color; continue; } catch {} } rest.push(w); }
+      const conf = loadConf();
+      await jsonOrDie(await authFetch(`/rest/v1/time_entries`, { method: "POST", body: JSON.stringify({ profile_id: conf.user_id, entry_date: new Date().toISOString().slice(0, 10), hours, mission_id, note: rest.join(" ") || null, source: "extra" }) }), "Log extra");
+      console.log(lime("✓ ") + `${bold(hours + "h")} extra${mcolor ? "  " + hex(mcolor, DOT) : ""}${rest.length ? "  " + white(rest.join(" ")) : ""}  ${faint("production")}`); break;
+    }
+
+    case "whoami": { const c = loadConf(); if (!c) die("Not logged in."); console.log(`${lime(DOT)} ${c.email}`); break; }
 
     default:
-      console.log(`${bold("msn")} — Missions from the terminal
-  ${bold("Tasks")}
-  msn today                       open tasks due/overdue
-  msn week                        this week's tasks by day
-  msn mine                        tasks assigned to me
-  msn ls <KEY> [--all]            a mission's tasks
-  msn add <KEY> "title" [!1] [#tag]
-  msn start|done <KEY-n>          set doing / done
-  msn postpone <KEY-n> +3d|monday|YYYY-MM-DD
-  msn comment <KEY-n> "text" [--question]
-  ${bold("Missions")}
-  msn missions                    all projects, grouped
-  msn new <client|internal|team> "Name" [KEY]
-  ${bold("Time")}
-  msn extra <hours> [KEY] "note"  log extra (always production)
-  ${bold("Account")}
-  msn login [email] · msn whoami`);
+      console.log(`
+${lime("▌")} ${bold("msn")} ${dim("— Missions from the terminal")}
+${faint("──────────────────────────────────────")}
+  ${grey("Tasks")}
+  ${white("today")}                    open tasks due/overdue
+  ${white("week")}                     this week by day
+  ${white("mine")}                     tasks assigned to me
+  ${white("ls")} ${dim("<KEY> [--all]")}         a mission's tasks
+  ${white("add")} ${dim('<KEY> "title" [!1] [#tag]')}
+  ${white("start")}${dim("|")}${white("done")} ${dim("<KEY-n>")}         set doing / done
+  ${white("postpone")} ${dim("<KEY-n> +3d|monday|date")}
+  ${white("comment")} ${dim('<KEY-n> "text" [--question]')}
+  ${grey("Missions")}
+  ${white("missions")}                 all projects, grouped
+  ${white("new")} ${dim('<client|internal|team> "Name" [KEY]')}
+  ${grey("Time")}
+  ${white("extra")} ${dim('<hours> [KEY] "note"')}    log extra (production)
+  ${grey("Account")}
+  ${white("login")} ${dim("[email]")}  ${dim("·")}  ${white("whoami")}
+`);
   }
 })().catch((e) => die(e.message || String(e)));
