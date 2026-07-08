@@ -381,6 +381,32 @@ const TOOLS = {
     },
   },
 
+  upload_file: {
+    description: "Upload a local file to a mission. file_path is a path on the user's machine. By default the file is internal; set visible_to_head / visible_to_client to share it. Confirm the path with the user if unsure.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, file_path: { type: "string" }, visible_to_head: { type: "boolean" }, visible_to_client: { type: "boolean" } }, required: ["mission_key", "file_path"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key); const conf = loadConf();
+      let fp = a.file_path; if (fp.startsWith("~/")) fp = path.join(os.homedir(), fp.slice(2));
+      let buf; try { buf = fs.readFileSync(fp); } catch { throw new Error(`Can't read file at "${a.file_path}".`); }
+      const filename = path.basename(fp);
+      const safe = filename.replace(/[^\w.\-]+/g, "_").slice(0, 120);
+      const uniq = ((globalThis.crypto && globalThis.crypto.randomUUID && globalThis.crypto.randomUUID()) || String(Date.now())) + "-" + safe;
+      const spath = `${m.id}/${uniq}`;
+      const ext = (filename.split(".").pop() || "").toLowerCase();
+      const CT = { csv: "text/csv", json: "application/json", pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", txt: "text/plain", md: "text/markdown", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", zip: "application/zip" };
+      const contentType = CT[ext] || "application/octet-stream";
+      const doUpload = async (tok) => fetch(`${URL_}/storage/v1/object/mission-files/${spath.split("/").map(encodeURIComponent).join("/")}`, { method: "POST", headers: { apikey: ANON, Authorization: `Bearer ${tok}`, "Content-Type": contentType, "x-upsert": "false" }, body: buf });
+      let up = await doUpload(conf.access_token);
+      if (up.status === 401 && conf.refresh_token && await refresh(conf)) up = await doUpload(loadConf().access_token);
+      if (!up.ok) { let d = ""; try { d = (await up.json()).message || ""; } catch {} throw new Error(`Upload failed (HTTP ${up.status})${d ? ": " + d : ""}`); }
+      try {
+        await api(`/rest/v1/mission_files`, { method: "POST", body: JSON.stringify({ mission_id: m.id, filename, storage_path: spath, size_bytes: buf.length, content_type: contentType, uploaded_by: conf.user_id, visible_to_head: !!a.visible_to_head, visible_to_client: !!a.visible_to_client }) });
+      } catch (e) { await fetch(`${URL_}/storage/v1/object/mission-files/${encodeURIComponent(spath)}`, { method: "DELETE", headers: { apikey: ANON, Authorization: `Bearer ${loadConf().access_token}` } }).catch(() => {}); throw e; }
+      const vis = [a.visible_to_head && "head", a.visible_to_client && "client"].filter(Boolean).join("+") || "internal";
+      return `Uploaded ${filename} to ${m.key} (${Math.max(1, Math.round(buf.length / 1024))}KB · ${vis}).`;
+    },
+  },
+
   // ── mission members ──
   add_collaborator: {
     description: "Add a teammate (by name) as a collaborator on a mission. Owner/admin only (enforced by permissions).",
