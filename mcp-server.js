@@ -209,10 +209,10 @@ const TOOLS = {
     schema: { type: "object", properties: {} },
     run: async () => {
       const reqs = await api(`/rest/v1/tasks?select=number,title,urgency,triage_status,missions!inner(key)&source=eq.client&triage_status=in.(pending,postponed)&order=urgency.desc,created_at.asc`);
-      const qs = await api(`/rest/v1/tasks?select=number,title,missions!inner(key)&kind=eq.question&status=neq.done&order=created_at.asc`);
+      const heads = await api(`/rest/v1/head_asks?select=kind,title,when_text,missions:missions!head_asks_mission_id_fkey(key),head:profiles!head_asks_from_head_id_fkey(full_name)&status=eq.open&order=created_at.asc`).catch(() => []);
       const lines = [];
       if (reqs.length) lines.push("CLIENTS (à trier):\n" + reqs.map((t) => `  ${t.missions.key}-${t.number}  [${t.urgency || "normale"}${t.triage_status === "postponed" ? ", reporté" : ""}] ${t.title}`).join("\n"));
-      if (qs.length) lines.push("QUESTIONS:\n" + qs.map((t) => `  ${t.missions.key}-${t.number}  ${t.title}`).join("\n"));
+      if (heads.length) lines.push("HEADS (demandes):\n" + heads.map((h) => `  ${h.missions ? h.missions.key : "?"}  [${h.kind}] ${h.title}${h.when_text ? " — " + h.when_text : ""}  (${h.head ? h.head.full_name : "?"})`).join("\n"));
       return lines.length ? lines.join("\n\n") : "Inbox empty — nothing to triage.";
     },
   },
@@ -266,6 +266,225 @@ const TOOLS = {
       if (a.confirm !== true) return `⚠️ About to permanently delete ${t.mission.key}-${t.number}: "${t.title}" (status: ${t.status}). This cannot be undone. Confirm with the user, then call delete_task again with confirm=true.`;
       await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "DELETE" });
       return `Deleted ${t.mission.key}-${t.number} — ${t.title}`;
+    },
+  },
+
+  set_urgency: {
+    description: "Set a task's urgency: normale, haute, or critique.",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, urgency: { type: "string", enum: ["normale", "haute", "critique"] } }, required: ["task_ref", "urgency"] },
+    run: async (a) => { const t = await resolveTask(a.task_ref); await api(`/rest/v1/rpc/set_task_urgency`, { method: "POST", body: JSON.stringify({ _task_id: t.id, _urgency: a.urgency }) }); return `${t.mission.key}-${t.number} urgency → ${a.urgency}`; },
+  },
+
+  // ── task relations ──
+  link_tasks: {
+    description: "Create a relation between two tasks. type 'blocks' means task_ref blocks other_ref; type 'related' links them.",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, type: { type: "string", enum: ["blocks", "related"] }, other_ref: { type: "string" } }, required: ["task_ref", "type", "other_ref"] },
+    run: async (a) => { const t = await resolveTask(a.task_ref); const o = await resolveTask(a.other_ref); await api(`/rest/v1/task_relations`, { method: "POST", body: JSON.stringify({ task_id: t.id, related_task_id: o.id, type: a.type }) }); return `${t.mission.key}-${t.number} ${a.type === "blocks" ? "blocks" : "related to"} ${o.mission.key}-${o.number}`; },
+  },
+  show_relations: {
+    description: "Show what a task blocks, what blocks it, and related tasks.",
+    schema: { type: "object", properties: { task_ref: { type: "string" } }, required: ["task_ref"] },
+    run: async (a) => {
+      const t = await resolveTask(a.task_ref);
+      const out = await api(`/rest/v1/task_relations?select=type,task_id,related_task_id,task:tasks!task_relations_task_id_fkey(number,title,status,missions(key)),related:tasks!task_relations_related_task_id_fkey(number,title,status,missions(key))&or=(task_id.eq.${t.id},related_task_id.eq.${t.id})`);
+      if (!out.length) return `${t.mission.key}-${t.number}: no relations.`;
+      const fmt = (x) => x && x.missions ? `${x.missions.key}-${x.number} [${x.status}] ${x.title}` : "?";
+      const blocks = out.filter((r) => r.type === "blocks" && r.task_id === t.id).map((r) => "  blocks → " + fmt(r.related));
+      const blockedBy = out.filter((r) => r.type === "blocks" && r.related_task_id === t.id).map((r) => "  blocked by ← " + fmt(r.task));
+      const rel = out.filter((r) => r.type === "related").map((r) => "  related · " + fmt(r.task_id === t.id ? r.related : r.task));
+      return `${t.mission.key}-${t.number} — ${t.title}\n` + [...blockedBy, ...blocks, ...rel].join("\n");
+    },
+  },
+
+  // ── mission detail + notes ──
+  show_mission: {
+    description: "Full detail of one mission by key: client, head, dates, goal, status, links, team members, and task counts.",
+    schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const rows = await api(`/rest/v1/missions?select=id,key,name,kind,mission_type,status,phase,client_company,head_name,goal,start_date,end_date,notion_url,slack_url,dashboard_url&key=ilike.${encodeURIComponent(a.mission_key)}`);
+      if (!rows.length) throw new Error(`No mission "${a.mission_key.toUpperCase()}".`);
+      const m = rows[0];
+      const members = await api(`/rest/v1/mission_members?select=role_on_mission,profiles(full_name)&mission_id=eq.${m.id}`);
+      const counts = await api(`/rest/v1/tasks?select=status&mission_id=eq.${m.id}`);
+      const c = { todo: 0, doing: 0, done: 0 }; for (const t of counts) c[t.status] = (c[t.status] || 0) + 1;
+      const links = [m.notion_url && "Notion", m.slack_url && "Slack", m.dashboard_url && "Dashboard"].filter(Boolean).join(", ") || "—";
+      return `${m.key} — ${m.name}  [${m.kind}${m.mission_type ? "/" + m.mission_type : ""}, ${m.status}${m.phase ? ", " + m.phase : ""}]
+  Client: ${m.client_company || "—"}   Head: ${m.head_name || "—"}
+  Window: ${m.start_date || "—"} → ${m.end_date || "∞"}
+  Goal: ${m.goal || "—"}
+  Team: ${members.map((x) => `${x.profiles ? x.profiles.full_name : "?"} (${x.role_on_mission})`).join(", ") || "—"}
+  Tasks: ${c.todo} todo · ${c.doing} doing · ${c.done} done
+  Links: ${links}`;
+    },
+  },
+  list_notes: {
+    description: "List the notes on a mission (by key).",
+    schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const rows = await api(`/rest/v1/mission_notes?select=title,content,is_client_visible,updated_at&mission_id=eq.${m.id}&order=updated_at.desc`);
+      if (!rows.length) return `${m.key}: no notes.`;
+      return `${m.key} — notes\n` + rows.map((n) => `  • ${n.title}${n.is_client_visible ? " (client-visible)" : ""}\n    ${(n.content || "").slice(0, 200)}`).join("\n");
+    },
+  },
+  add_note: {
+    description: "Add a note to a mission. client_visible defaults false (internal).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, content: { type: "string" }, client_visible: { type: "boolean" } }, required: ["mission_key", "title", "content"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key); const conf = loadConf();
+      await api(`/rest/v1/mission_notes`, { method: "POST", body: JSON.stringify({ mission_id: m.id, title: a.title, content: a.content, is_client_visible: !!a.client_visible, created_by: conf.user_id }) });
+      return `Note added to ${m.key}: ${a.title}`;
+    },
+  },
+
+  // ── mission members ──
+  add_collaborator: {
+    description: "Add a teammate (by name) as a collaborator on a mission. Owner/admin only (enforced by permissions).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, name: { type: "string" } }, required: ["mission_key", "name"] },
+    run: async (a) => { const m = await resolveMission(a.mission_key); const p = await resolveAssignee(a.name); await api(`/rest/v1/mission_members`, { method: "POST", body: JSON.stringify({ mission_id: m.id, profile_id: p.id, role_on_mission: "collaborator" }) }); return `Added ${p.full_name} to ${m.key} as collaborator.`; },
+  },
+  request_access: {
+    description: "Request access to a mission you're not a member of (by key). Notifies the owner.",
+    schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
+    run: async (a) => { const m = await resolveMission(a.mission_key); const conf = loadConf(); await api(`/rest/v1/mission_access_requests`, { method: "POST", body: JSON.stringify({ mission_id: m.id, requester_id: conf.user_id, status: "pending" }) }); return `Access requested for ${m.key}.`; },
+  },
+
+  // ── head requests (heads ask, admin/engineers see & reply) ──
+  create_request: {
+    description: "Create a request to the mission's engineer (used by heads of mission). kind: 'task' (do this), 'question', or 'meeting'. 'when' is free text like 'demain' or 'avant vendredi'. Lands in the engineer's inbox.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, kind: { type: "string", enum: ["task", "question", "meeting"] }, title: { type: "string" }, body: { type: "string" }, when: { type: "string" } }, required: ["mission_key", "title"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key); const conf = loadConf();
+      await api(`/rest/v1/head_asks`, { method: "POST", body: JSON.stringify({ mission_id: m.id, from_head_id: conf.user_id, kind: a.kind || "task", title: a.title, body: a.body || null, when_text: a.when || null }) });
+      return `Request sent on ${m.key}: ${a.title}`;
+    },
+  },
+  reply_request: {
+    description: "Reply to an open head request on a mission, matched by a phrase in its title.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title_contains: { type: "string" }, text: { type: "string" } }, required: ["mission_key", "title_contains", "text"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key); const conf = loadConf();
+      const asks = await api(`/rest/v1/head_asks?select=id,title&mission_id=eq.${m.id}&status=eq.open&title=ilike.*${encodeURIComponent(a.title_contains)}*`);
+      if (!asks.length) throw new Error(`No open request on ${m.key} matching "${a.title_contains}".`);
+      if (asks.length > 1) throw new Error(`Several match: ${asks.map((x) => x.title).join(" / ")}. Be more specific.`);
+      await api(`/rest/v1/head_ask_replies`, { method: "POST", body: JSON.stringify({ ask_id: asks[0].id, author_id: conf.user_id, body: a.text }) });
+      return `Replied to "${asks[0].title}".`;
+    },
+  },
+  resolve_request: {
+    description: "Mark an open head request resolved (matched by a phrase in its title).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title_contains: { type: "string" } }, required: ["mission_key", "title_contains"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const asks = await api(`/rest/v1/head_asks?select=id,title&mission_id=eq.${m.id}&status=eq.open&title=ilike.*${encodeURIComponent(a.title_contains)}*`);
+      if (!asks.length) throw new Error(`No open request matching "${a.title_contains}".`);
+      if (asks.length > 1) throw new Error(`Several match — be more specific.`);
+      await api(`/rest/v1/head_asks?id=eq.${asks[0].id}`, { method: "PATCH", body: JSON.stringify({ status: "resolved", resolved_at: new Date().toISOString() }) });
+      return `Resolved "${asks[0].title}".`;
+    },
+  },
+
+  // ── time summary ──
+  time_summary: {
+    description: "This week's time: meeting hours (from calendar) vs production, extra hours logged, and the production ratio (target ≥ 66%).",
+    schema: { type: "object", properties: {} },
+    run: async () => {
+      const conf = loadConf();
+      const now = new Date(); const day = now.getDay() || 7; const mon = new Date(now); mon.setDate(now.getDate() - (day - 1)); mon.setHours(0, 0, 0, 0);
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 7);
+      const cal = await api(`/functions/v1/gcal-events`, { method: "POST", body: JSON.stringify({ start: mon.toISOString(), end: sun.toISOString() }) });
+      const events = (cal && cal.events) || cal || [];
+      let meetingH = 0; for (const e of events) if (!e.all_day && (e.attendee_count || 0) > 0) meetingH += (new Date(e.end) - new Date(e.start)) / 36e5;
+      meetingH = Math.round(meetingH * 2) / 2;
+      const extras = await api(`/rest/v1/time_entries?select=hours&profile_id=eq.${conf.user_id}&source=eq.extra&entry_date=gte.${mon.toISOString().slice(0, 10)}`);
+      const extraH = extras.reduce((s, e) => s + Number(e.hours), 0);
+      const contract = 35; const prod = Math.max(0, contract - meetingH) + extraH;
+      const ratio = Math.round((prod / (prod + meetingH)) * 100);
+      return `This week: ${meetingH}h meetings · ${prod}h production${extraH ? " (incl. " + extraH + "h extra)" : ""}\n  ${ratio}% production ${ratio >= 66 ? "✓" : "(target ≥ 66%)"}`;
+    },
+  },
+
+  // ── playbooks ──
+  list_playbooks: {
+    description: "List available playbooks (methodologies).",
+    schema: { type: "object", properties: {} },
+    run: async () => { const rows = await api(`/rest/v1/playbooks?select=title,description&order=title.asc`); return rows.length ? rows.map((p) => `  • ${p.title}${p.description ? " — " + p.description : ""}`).join("\n") : "No playbooks."; },
+  },
+  show_playbook: {
+    description: "Show a playbook's steps by title (fuzzy match).",
+    schema: { type: "object", properties: { title: { type: "string" } }, required: ["title"] },
+    run: async (a) => {
+      const pbs = await api(`/rest/v1/playbooks?select=id,title,description&title=ilike.*${encodeURIComponent(a.title)}*`);
+      if (!pbs.length) throw new Error(`No playbook matching "${a.title}".`);
+      const p = pbs[0];
+      const steps = await api(`/rest/v1/playbook_steps?select=position,title,tips&playbook_id=eq.${p.id}&order=position.asc`);
+      return `${p.title}${p.description ? " — " + p.description : ""}\n` + steps.map((s, i) => `  ${i + 1}. ${s.title}${s.tips ? "  (tip: " + s.tips + ")" : ""}`).join("\n");
+    },
+  },
+  apply_playbook: {
+    description: "Apply a playbook to a mission — creates its steps as tasks in that mission. playbook by title (fuzzy), mission by key.",
+    schema: { type: "object", properties: { playbook_title: { type: "string" }, mission_key: { type: "string" } }, required: ["playbook_title", "mission_key"] },
+    run: async (a) => {
+      const pbs = await api(`/rest/v1/playbooks?select=id,title&title=ilike.*${encodeURIComponent(a.playbook_title)}*`);
+      if (!pbs.length) throw new Error(`No playbook matching "${a.playbook_title}".`);
+      const p = pbs[0]; const m = await resolveMission(a.mission_key); const conf = loadConf();
+      const steps = await api(`/rest/v1/playbook_steps?select=id,title,description,tips&playbook_id=eq.${p.id}&order=position.asc`);
+      if (!steps.length) return `"${p.title}" has no steps.`;
+      const reqs = await api(`/rest/v1/step_requirements?select=step_id,type,label,note&step_id=in.(${steps.map((s) => s.id).join(",")})`);
+      const byStep = {}; for (const r of reqs) (byStep[r.step_id] = byStep[r.step_id] || []).push(r);
+      const rows = steps.map((s) => {
+        let desc = s.description || "";
+        if (s.tips) desc += (desc ? "\n\n" : "") + "**Tips**\n" + s.tips;
+        const rs = byStep[s.id] || []; if (rs.length) desc += (desc ? "\n\n" : "") + "**Prérequis**\n" + rs.map((r) => `- [${r.type}] ${r.label}${r.note ? " — " + r.note : ""}`).join("\n");
+        return { mission_id: m.id, title: s.title, description: desc || null, status: "todo", source: "manual", is_client_visible: false, created_by: conf.user_id, tags: [`playbook:${p.id}`], playbook_step_id: s.id };
+      });
+      await api(`/rest/v1/tasks`, { method: "POST", body: JSON.stringify(rows) });
+      return `Applied "${p.title}" to ${m.key} — created ${rows.length} tasks.`;
+    },
+  },
+
+  // ── stack (tool registry) ──
+  list_stack: {
+    description: "List the team's tool stack, grouped by category.",
+    schema: { type: "object", properties: {} },
+    run: async () => {
+      const rows = await api(`/rest/v1/stack_tools?select=name,category,description&order=category.asc,name.asc`);
+      if (!rows.length) return "Stack is empty.";
+      const byCat = {}; for (const t of rows) (byCat[t.category] = byCat[t.category] || []).push(t);
+      return Object.entries(byCat).map(([c, ts]) => c.toUpperCase() + "\n" + ts.map((t) => `  • ${t.name}${t.description ? " — " + t.description : ""}`).join("\n")).join("\n\n");
+    },
+  },
+  show_tool: {
+    description: "Show a stack tool's details and credentials by name (fuzzy). Credentials are visible to engineers/admin only (enforced by permissions).",
+    schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+    run: async (a) => {
+      const tools = await api(`/rest/v1/stack_tools?select=id,name,category,description,how_to_use,url,docs_url&name=ilike.*${encodeURIComponent(a.name)}*`);
+      if (!tools.length) throw new Error(`No tool matching "${a.name}".`);
+      const t = tools[0];
+      const creds = await api(`/rest/v1/stack_credentials?select=label,kind,value&tool_id=eq.${t.id}&order=position.asc`).catch(() => []);
+      return `${t.name} [${t.category}]${t.description ? "\n  " + t.description : ""}${t.url ? "\n  URL: " + t.url : ""}${t.docs_url ? "\n  Docs: " + t.docs_url : ""}${t.how_to_use ? "\n\nHow to use:\n" + t.how_to_use : ""}${creds.length ? "\n\nCredentials:\n" + creds.map((c) => `  ${c.label} (${c.kind}): ${c.value}`).join("\n") : ""}`;
+    },
+  },
+
+  // ── improvements (internal idea log) ──
+  log_improvement: {
+    description: "Log an improvement idea / feedback for the tools or process.",
+    schema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" } }, required: ["title"] },
+    run: async (a) => { const conf = loadConf(); await api(`/rest/v1/improvements`, { method: "POST", body: JSON.stringify({ author_id: conf.user_id, title: a.title, description: a.description || null, status: "open" }) }); return `Logged improvement: ${a.title}`; },
+  },
+  list_improvements: {
+    description: "List logged improvement ideas.",
+    schema: { type: "object", properties: {} },
+    run: async () => { const rows = await api(`/rest/v1/improvements?select=title,status&order=created_at.desc&limit=30`); return rows.length ? rows.map((i) => `  [${i.status}] ${i.title}`).join("\n") : "No improvements logged."; },
+  },
+
+  // ── calendar write ──
+  create_event: {
+    description: "Create a Google Calendar event on your calendar. start/end are ISO datetimes (e.g. 2026-07-10T15:00:00). guests is an array of emails. Invitees are notified.",
+    schema: { type: "object", properties: { title: { type: "string" }, start: { type: "string" }, end: { type: "string" }, guests: { type: "array", items: { type: "string" } }, description: { type: "string" }, meet: { type: "boolean" } }, required: ["title", "start", "end"] },
+    run: async (a) => {
+      const out = await api(`/functions/v1/gcal-write`, { method: "POST", body: JSON.stringify({ action: "create", title: a.title, start: a.start, end: a.end, guests: a.guests || [], description: a.description || "", meet: !!a.meet }) });
+      return `Created event "${a.title}" (${a.start} → ${a.end})${a.guests && a.guests.length ? " with " + a.guests.length + " guests" : ""}.`;
     },
   },
 };
