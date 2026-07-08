@@ -588,6 +588,52 @@ const TOOLS = {
         + (creds.length ? "\n\nCredentials:\n" + creds.map(cred).join("\n") : "");
     },
   },
+  add_stack_tool: {
+    description: "Add a tool to a mission's customer stack (the client's own tools). category is one of enrichment/outbound/crm/infra/ai/other. Requires admin or an engineer assigned to the mission.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, name: { type: "string" }, category: { type: "string", enum: ["enrichment", "outbound", "crm", "infra", "ai", "other"] }, url: { type: "string" }, description: { type: "string" }, docs_url: { type: "string" }, how_to_use: { type: "string" } }, required: ["mission_key", "name", "category"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key); const conf = loadConf();
+      const payload = { mission_id: m.id, name: a.name, category: a.category, created_by: conf.user_id };
+      if (a.url) { payload.url = a.url; try { payload.favicon_url = `https://www.google.com/s2/favicons?domain=${new URL(a.url).hostname}&sz=64`; } catch {} }
+      if (a.description) payload.description = a.description;
+      if (a.docs_url) payload.docs_url = a.docs_url;
+      if (a.how_to_use) payload.how_to_use = a.how_to_use;
+      await api(`/rest/v1/stack_tools`, { method: "POST", body: JSON.stringify(payload) });
+      return `Added ${a.name} [${a.category}] to ${m.key} — ${m.name} stack.`;
+    },
+  },
+  add_stack_credential: {
+    description: "Add a credential to a stack tool (found by name within the mission). kind is api_key/login/password/workspace_url/token/other. Leave value empty to create a slot for the client to fill on the portal — set instructions to tell them what to paste. Requires admin or an engineer on the mission.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, tool_name: { type: "string" }, label: { type: "string" }, kind: { type: "string", enum: ["api_key", "login", "password", "workspace_url", "token", "other"] }, value: { type: "string" }, instructions: { type: "string" }, url: { type: "string" } }, required: ["mission_key", "tool_name", "label", "kind"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const tools = await api(`/rest/v1/stack_tools?select=id,name&mission_id=eq.${m.id}&name=ilike.*${encodeURIComponent(a.tool_name)}*`);
+      if (!tools.length) throw new Error(`No tool matching "${a.tool_name}" in ${m.key} stack.`);
+      const t = tools[0];
+      const payload = { tool_id: t.id, label: a.label, kind: a.kind, value: a.value || "" };
+      if (a.instructions) payload.instructions = a.instructions;
+      if (a.url) payload.url = a.url;
+      await api(`/rest/v1/stack_credentials`, { method: "POST", body: JSON.stringify(payload) });
+      return `Added credential "${a.label}" (${a.kind}) to ${t.name} in ${m.key} stack${a.value ? "" : " — awaiting client fill"}.`;
+    },
+  },
+
+  // ── activity ──
+  activity: {
+    description: "Recent activity across missions (tasks created/completed/postponed/deleted, triage decisions), grouped by mission — the source for a weekly recap. Optional mission_key to scope; days sets the window (default 7).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, days: { type: "number" } } },
+    run: async (a) => {
+      const days = a.days || 7; const since = new Date(Date.now() - days * 864e5).toISOString();
+      let f = "";
+      if (a.mission_key) { const m = await resolveMission(a.mission_key); f = `&mission_id=eq.${m.id}`; }
+      const rows = await api(`/rest/v1/activities?select=action,created_at,meta,actor:profiles!actor_id(full_name),missions(key,name)&created_at=gte.${since}${f}&order=created_at.desc&limit=200`);
+      if (!rows.length) return `No activity in the last ${days} day(s).`;
+      const byM = {};
+      for (const r of rows) { const k = r.missions ? r.missions.key : "—"; (byM[k] = byM[k] || []).push(r); }
+      const label = (r) => `${String(r.created_at).slice(0, 10)}  ${String(r.action).replace(/_/g, " ")}${r.actor && r.actor.full_name ? " · " + r.actor.full_name : ""}${r.meta && r.meta.title ? " — " + r.meta.title : ""}`;
+      return `Activity — last ${days}d (${rows.length})\n` + Object.entries(byM).map(([k, rs]) => `${k}\n` + rs.map((r) => "  " + label(r)).join("\n")).join("\n\n");
+    },
+  },
 
   // ── improvements (internal idea log) ──
   log_improvement: {
