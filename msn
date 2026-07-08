@@ -165,7 +165,6 @@ const [, , cmd, ...args] = process.argv;
       }
       const email = (args[0] || (await ask("email: "))).trim();
       const password = await ask("password: ", { hidden: true });
-      console.log(dim(`(email "${email}", ${password.length} char password)`));
       const r = await fetch(`${URL_}/auth/v1/token?grant_type=password`, {
         method: "POST",
         headers: { apikey: ANON, "Content-Type": "application/json" },
@@ -271,7 +270,7 @@ const [, , cmd, ...args] = process.argv;
         if (!group.length) continue;
         console.log(bold(kindOf[kind]));
         for (const m of group) {
-          const t = m.mission_type ? dim(` ${m.mission_type}`) : "";
+          const t = (m.kind === "client" && m.mission_type) ? dim(` ${m.mission_type}`) : "";
           const st = m.status !== "active" ? dim(` (${m.status})`) : "";
           console.log(`  ${dim(m.key.padEnd(5))} ${m.name}${t}${st}`);
         }
