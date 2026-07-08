@@ -143,6 +143,26 @@ const [, , cmd, ...args] = process.argv;
 (async () => {
   switch (cmd) {
     case "login": {
+      if (args[0] === "--paste") {
+        console.log(dim("In the app's browser tab: DevTools → Application → Local Storage →\n" +
+          "copy the value of the key starting 'sb-' and ending '-auth-token', then paste it here."));
+        const raw = (await ask("paste session: ")).trim();
+        let sess;
+        try {
+          let v = raw;
+          const parsed = JSON.parse(v);
+          // supabase stores either the session object directly, or [session] / {currentSession}
+          sess = parsed.access_token ? parsed : parsed.currentSession || parsed[0] || parsed;
+        } catch { die("Could not parse — paste the full JSON value of the sb-…-auth-token key."); }
+        if (!sess?.access_token) die("No access_token found in what you pasted.");
+        saveConf({ email: sess.user?.email || "session", access_token: sess.access_token,
+          refresh_token: sess.refresh_token, user_id: sess.user?.id });
+        // verify it works
+        const chk = await authFetch(`/rest/v1/profiles?select=full_name,role&id=eq.${sess.user?.id}`, {}, false);
+        const who = chk.ok ? (await chk.json())[0] : null;
+        console.log(lime(`Logged in`) + (who ? ` as ${who.full_name || sess.user?.email} (${who.role})` : ""));
+        break;
+      }
       const email = (args[0] || (await ask("email: "))).trim();
       const password = await ask("password: ", { hidden: true });
       console.log(dim(`(email "${email}", ${password.length} char password)`));
