@@ -253,6 +253,20 @@ const [, , cmd, ...args] = process.argv;
 
     case "whoami": { const c = loadConf(); if (!c) die("Not logged in."); console.log(`${lime(DOT)} ${c.email}`); break; }
 
+    case "upgrade": {
+      const BASE = "https://raw.githubusercontent.com/xotw/missions-cli/main";
+      const dl = async (f) => { const r = await fetch(`${BASE}/${f}`); if (!r.ok) throw new Error(`fetch ${f} → ${r.status}`); return await r.text(); };
+      const self = fs.realpathSync(process.argv[1]); // the msn file we're running from (symlinks resolved)
+      const candidates = [path.join(CONF_DIR, "mcp-server.js"), path.join(path.dirname(self), "missions-mcp-server.js")];
+      let mcpTargets = candidates.filter((p) => fs.existsSync(p));
+      if (!mcpTargets.length) mcpTargets = [candidates[0]]; // standard install location if none found yet
+      const [msnSrc, mcpSrc] = await Promise.all([dl("msn"), dl("mcp-server.js")]);
+      try { fs.writeFileSync(self, msnSrc, { mode: 0o755 }); } catch (e) { die(`Can't write ${self} (${e.code}). Try: sudo, or rerun install.sh.`); }
+      console.log(lime("✓ ") + `msn   ${faint(self)}`);
+      for (const t of mcpTargets) { fs.writeFileSync(t, mcpSrc); console.log(lime("✓ ") + `mcp   ${faint(t)}`); }
+      console.log(amber("\n→ Restart Claude Code") + dim(" to reload the MCP server with the new build.")); break;
+    }
+
     default:
       console.log(`
 ${lime("▌")} ${bold("msn")} ${dim("— Missions from the terminal")}
@@ -272,7 +286,7 @@ ${faint("───────────────────────�
   ${grey("Time")}
   ${white("extra")} ${dim('<hours> [KEY] "note"')}    log extra (production)
   ${grey("Account")}
-  ${white("login")} ${dim("[email]")}  ${dim("·")}  ${white("whoami")}
+  ${white("login")} ${dim("[email]")}  ${dim("·")}  ${white("whoami")}  ${dim("·")}  ${white("upgrade")} ${dim("(pull latest msn + MCP)")}
 `);
   }
 })().catch((e) => die(e.message || String(e)));
