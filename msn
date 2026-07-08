@@ -8,7 +8,7 @@ const os = require("os");
 const readline = require("readline");
 
 const URL_ = "https://impdannmrwfcphkkgyaj.supabase.co";
-const ANON = "sb_publishable_2Q-FE_KrJmNuhrjXogPmWw_zBSCU0uy"; // public by design; RLS is the security layer
+const ANON = "sb_publishable_2Q-FEPM5qK-flJaqHzE8hg_CvG9I6LM"; // public by design; RLS is the security layer
 const CONF_DIR = path.join(os.homedir(), ".config", "msn");
 const CONF = path.join(CONF_DIR, "config.json");
 
