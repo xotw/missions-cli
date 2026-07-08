@@ -150,6 +150,101 @@ const TOOLS = {
       return `Logged ${a.hours}h extra${a.mission_key ? " on " + a.mission_key.toUpperCase() : ""} (production).`;
     },
   },
+
+  calendar: {
+    description: "Your Google Calendar events for the next N days (default 7). Shows time, title, and attendee count.",
+    schema: { type: "object", properties: { days: { type: "number", description: "how many days ahead (default 7)" } } },
+    run: async (a) => {
+      const days = a.days || 7; const now = new Date(); const end = new Date(now.getTime() + days * 864e5);
+      const out = await api(`/functions/v1/gcal-events`, { method: "POST", body: JSON.stringify({ start: now.toISOString(), end: end.toISOString() }) });
+      const events = (out && out.events) || out || [];
+      if (!events.length) return `No calendar events in the next ${days} days.`;
+      const byDay = {};
+      for (const e of events) { const d = new Date(e.start).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }); (byDay[d] = byDay[d] || []).push(e); }
+      return Object.entries(byDay).map(([d, evs]) => d + "\n" + evs.map((e) => {
+        const t = e.all_day ? "all day" : new Date(e.start).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+        return `  ${t}  ${e.title}${e.attendee_count ? ` (${e.attendee_count} guests)` : ""}`;
+      }).join("\n")).join("\n\n");
+    },
+  },
+  upcoming_meetings: {
+    description: "Your upcoming meetings (calendar events that have other attendees) for the next N days (default 3).",
+    schema: { type: "object", properties: { days: { type: "number", description: "how many days ahead (default 3)" } } },
+    run: async (a) => {
+      const days = a.days || 3; const now = new Date(); const end = new Date(now.getTime() + days * 864e5);
+      const out = await api(`/functions/v1/gcal-events`, { method: "POST", body: JSON.stringify({ start: now.toISOString(), end: end.toISOString() }) });
+      const events = ((out && out.events) || out || []).filter((e) => !e.all_day && (e.attendee_count || 0) > 0 && new Date(e.start) >= now);
+      if (!events.length) return `No meetings in the next ${days} days.`;
+      return `Upcoming meetings:\n` + events.map((e) => {
+        const when = new Date(e.start).toLocaleString("fr-FR", { weekday: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+        return `  ${when}  ${e.title} (${e.attendee_count} guests)`;
+      }).join("\n");
+    },
+  },
+  inbox: {
+    description: "Your triage inbox: pending client requests and open questions awaiting a decision, with their urgency.",
+    schema: { type: "object", properties: {} },
+    run: async () => {
+      const reqs = await api(`/rest/v1/tasks?select=number,title,urgency,triage_status,missions!inner(key)&source=eq.client&triage_status=in.(pending,postponed)&order=urgency.desc,created_at.asc`);
+      const qs = await api(`/rest/v1/tasks?select=number,title,missions!inner(key)&kind=eq.question&status=neq.done&order=created_at.asc`);
+      const lines = [];
+      if (reqs.length) lines.push("CLIENTS (à trier):\n" + reqs.map((t) => `  ${t.missions.key}-${t.number}  [${t.urgency || "normale"}${t.triage_status === "postponed" ? ", reporté" : ""}] ${t.title}`).join("\n"));
+      if (qs.length) lines.push("QUESTIONS:\n" + qs.map((t) => `  ${t.missions.key}-${t.number}  ${t.title}`).join("\n"));
+      return lines.length ? lines.join("\n\n") : "Inbox empty — nothing to triage.";
+    },
+  },
+  list_comments: {
+    description: "Read the comments/discussion thread on a task by its reference (e.g. TEL-12).",
+    schema: { type: "object", properties: { task_ref: { type: "string" } }, required: ["task_ref"] },
+    run: async (a) => {
+      const t = await resolveTask(a.task_ref);
+      const rows = await api(`/rest/v1/comments?select=body,is_question,created_at,resolved_at,author:profiles!comments_author_id_fkey(full_name)&task_id=eq.${t.id}&order=created_at.asc`);
+      if (!rows.length) return `${t.mission.key}-${t.number}: no comments.`;
+      return `${t.mission.key}-${t.number} — ${t.title}\n` + rows.map((c) => `  ${(c.author && c.author.full_name) || "?"}${c.is_question ? " [Q" + (c.resolved_at ? ", répondu" : "") + "]" : ""}: ${c.body}`).join("\n");
+    },
+  },
+  accept_request: {
+    description: "Accept a client request from the inbox (task ref). Optionally set priority (p1/p2/p3) and a due date (YYYY-MM-DD).",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, priority: { type: "string", enum: ["p1", "p2", "p3"] }, due_date: { type: "string" } }, required: ["task_ref"] },
+    run: async (a) => {
+      const t = await resolveTask(a.task_ref); const patch = { triage_status: "accepted", triage_at: new Date().toISOString() };
+      if (a.priority) patch.priority = a.priority; if (a.due_date) patch.due_date = a.due_date;
+      await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `Accepted ${t.mission.key}-${t.number}${a.due_date ? " (due " + a.due_date + ")" : ""}.`;
+    },
+  },
+  postpone_request: {
+    description: "Postpone a client request with a written reason and a resurface date (when: +Nd, monday, or YYYY-MM-DD). The reason is shown to the client.",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, when: { type: "string" }, reason: { type: "string" } }, required: ["task_ref", "when", "reason"] },
+    run: async (a) => {
+      const t = await resolveTask(a.task_ref); let tgt; const rel = String(a.when).match(/^\+(\d+)d$/);
+      if (rel) { const d = new Date(); d.setDate(d.getDate() + +rel[1]); tgt = d.toISOString().slice(0, 10); }
+      else if (/^\d{4}-\d{2}-\d{2}$/.test(a.when)) tgt = a.when;
+      else if (a.when === "monday") { const d = new Date(); d.setDate(d.getDate() + (((1 - d.getDay() + 7) % 7) || 7)); tgt = d.toISOString().slice(0, 10); }
+      else throw new Error("when must be +Nd, monday, or YYYY-MM-DD");
+      await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ triage_status: "postponed", triage_reason: a.reason, triage_at: new Date().toISOString(), due_date: tgt }) });
+      return `Postponed ${t.mission.key}-${t.number} to ${tgt} — reason recorded.`;
+    },
+  },
+  decline_request: {
+    description: "Decline a client request. Reason is optional (e.g. 'Doublon'). Shown to the client if given.",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, reason: { type: "string" } }, required: ["task_ref"] },
+    run: async (a) => {
+      const t = await resolveTask(a.task_ref);
+      await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ triage_status: "declined", triage_reason: a.reason || null, triage_at: new Date().toISOString() }) });
+      return `Declined ${t.mission.key}-${t.number}${a.reason ? " — " + a.reason : ""}.`;
+    },
+  },
+  delete_task: {
+    description: "Permanently delete a task (DESTRUCTIVE, no undo). ALWAYS confirm the exact task with the user first. Without confirm=true this returns a preview instead of deleting — never pass confirm=true unless the user has explicitly agreed to delete this specific task.",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, confirm: { type: "boolean" } }, required: ["task_ref"] },
+    run: async (a) => {
+      const t = await resolveTask(a.task_ref);
+      if (a.confirm !== true) return `⚠️ About to permanently delete ${t.mission.key}-${t.number}: "${t.title}" (status: ${t.status}). This cannot be undone. Confirm with the user, then call delete_task again with confirm=true.`;
+      await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "DELETE" });
+      return `Deleted ${t.mission.key}-${t.number} — ${t.title}`;
+    },
+  },
 };
 
 // ── MCP stdio transport (newline-delimited JSON-RPC 2.0) ─────────────────────
