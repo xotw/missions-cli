@@ -77,13 +77,13 @@ const TOOLS = {
     },
   },
   today: {
-    description: "The user's open tasks due today or overdue, across all missions.",
+    description: "MY tasks due today or overdue — tasks assigned to me, plus unassigned tasks on missions I own. Never shows tasks that belong to someone else. To see a whole mission's tasks (incl. others'), use list_tasks.",
     schema: { type: "object", properties: {} },
     run: async () => {
-      const today = new Date().toISOString().slice(0, 10);
-      const rows = await api(`/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key)&status=neq.done&due_date=lte.${today}&order=due_date.asc`);
-      if (!rows.length) return "Nothing due today.";
-      return `Today (${rows.length} open):\n` + rows.map((t) => "  " + fmtTask({ ...t, missions: t.missions }, true)).join("\n");
+      const conf = loadConf(); const today = new Date().toISOString().slice(0, 10);
+      const rows = await api(`/rest/v1/tasks?select=number,title,status,due_date,priority,missions!inner(key)&status=neq.done&due_date=lte.${today}&assignee_id=eq.${conf.user_id}&order=due_date.asc`);
+      if (!rows.length) return "Nothing assigned to you due today. (To see a mission's full board incl. unassigned work, ask for it by name.)";
+      return `Your day (${rows.length} due/overdue):\n` + rows.map((t) => "  " + fmtTask({ ...t, missions: t.missions }, true)).join("\n");
     },
   },
   my_tasks: {
