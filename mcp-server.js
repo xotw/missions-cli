@@ -500,7 +500,17 @@ async function handle(msg) {
     return reply(id, {
       protocolVersion: (params && params.protocolVersion) || "2024-11-05",
       capabilities: { tools: {} },
-      serverInfo: { name: "missions", version: "0.1.0" },
+      serverInfo: { name: "missions", version: "0.2.0" },
+      instructions: [
+        'This server ("missions") lets the user run their Bulldozer Missions app from the terminal — tasks, missions, inbox, calendar, playbooks, stack, time — everything scoped to the logged-in user\'s own permissions (row-level security; they can never do more than they can in the web app).',
+        '',
+        'MISSION CONTROL MODE — when the user says "let\'s work in mission control" (also "mission control", "on my missions", "travaillons dans mission control", "on bosse sur les missions"), in French or English:',
+        '1. Open with a tight standup using the tools: open tasks due today or overdue (today), the pending inbox (inbox), and this week\'s meetings (upcoming_meetings). A few scannable lines — no preamble.',
+        '2. Then act on whatever they ask, mapping plainly to the tools and confirming crisply. No command syntax — they just talk.',
+        '3. Bulldozer energy: proactively flag overdue tasks, hot (critique) inbox items, and blocked tasks.',
+        '',
+        'Always reply in the user\'s language (French or English — match how they wrote). Destructive actions (delete_task) must always confirm the exact item with the user before executing.',
+      ].join("\n"),
     });
   }
   if (method === "notifications/initialized" || method === "notifications/cancelled") return; // no response
