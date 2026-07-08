@@ -50,6 +50,19 @@ async function resolveAssignee(name) {
   if (rows.length > 1) throw new Error(`"${name}" matches several people (${rows.map((r) => r.full_name).join(", ")}) — be more specific.`);
   return rows[0];
 }
+// Accepts YYYY-MM-DD, +Nd, today/tomorrow (FR/EN), or a weekday name (FR/EN). Returns YYYY-MM-DD or throws.
+function parseDate(s) {
+  const t = String(s).trim().toLowerCase();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const d = new Date();
+  if (t === "today" || t === "aujourd'hui") return d.toISOString().slice(0, 10);
+  if (t === "tomorrow" || t === "demain") { d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); }
+  const rel = t.match(/^\+\s*(\d+)\s*d/); if (rel) { d.setDate(d.getDate() + +rel[1]); return d.toISOString().slice(0, 10); }
+  const days = { sunday: 0, dimanche: 0, monday: 1, lundi: 1, tuesday: 2, mardi: 2, wednesday: 3, mercredi: 3, thursday: 4, jeudi: 4, friday: 5, vendredi: 5, saturday: 6, samedi: 6 };
+  const wd = days[t.replace(/^(next|prochain|le)\s+/, "")];
+  if (wd !== undefined) { const diff = ((wd - d.getDay() + 7) % 7) || 7; d.setDate(d.getDate() + diff); return d.toISOString().slice(0, 10); }
+  throw new Error(`Couldn't read the date "${s}" — use YYYY-MM-DD, +Nd, today/tomorrow, or a weekday.`);
+}
 const fmtTask = (t, withKey) => `${withKey && t.missions ? t.missions.key + "-" + t.number + " " : ""}[${t.status}]${t.priority ? " " + t.priority : ""} ${t.title}${t.due_date ? " (due " + t.due_date + ")" : ""}`;
 
 // ── tools ───────────────────────────────────────────────────────────────────
@@ -77,7 +90,7 @@ const TOOLS = {
     },
   },
   today: {
-    description: "MY tasks due today or overdue — tasks assigned to me, plus unassigned tasks on missions I own. Never shows tasks that belong to someone else. To see a whole mission's tasks (incl. others'), use list_tasks.",
+    description: "MY tasks due today or overdue (assigned to me). To see a whole mission's tasks incl. others' or unassigned work, use list_tasks by mission name.",
     schema: { type: "object", properties: {} },
     run: async () => {
       const conf = loadConf(); const today = new Date().toISOString().slice(0, 10);
@@ -97,23 +110,23 @@ const TOOLS = {
     },
   },
   add_task: {
-    description: "Create a task in a mission. priority p1/p2/p3; due_date YYYY-MM-DD; assignee is a teammate's name (matched fuzzily); tags is an array of strings.",
+    description: "Create a task in a mission. priority p1/p2/p3; due_date (YYYY-MM-DD, +Nd, today/tomorrow, or a weekday like Friday); assignee is a teammate's name (matched fuzzily); tags is an array of strings.",
     schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, priority: { type: "string", enum: ["p1", "p2", "p3"] }, due_date: { type: "string" }, assignee: { type: "string" }, tags: { type: "array", items: { type: "string" } } }, required: ["mission_key", "title"] },
     run: async (a) => {
       const m = await resolveMission(a.mission_key); const conf = loadConf();
       const body = { mission_id: m.id, title: a.title, priority: a.priority || "p2", tags: a.tags || [], status: "todo", source: "manual", is_client_visible: false, created_by: conf.user_id };
-      if (a.due_date) body.due_date = a.due_date;
+      if (a.due_date) body.due_date = parseDate(a.due_date);
       let who = ""; if (a.assignee) { const p = await resolveAssignee(a.assignee); body.assignee_id = p.id; who = ` → ${p.full_name}`; }
       const [t] = await api(`/rest/v1/tasks`, { method: "POST", body: JSON.stringify(body) });
       return `Created ${m.key}-${t.number}: ${a.title}${a.due_date ? " (due " + a.due_date + ")" : ""}${who}`;
     },
   },
   update_task: {
-    description: "Edit an existing task by reference (e.g. TEL-12). Set any of: due_date (YYYY-MM-DD, or null to clear), priority (p1/p2/p3), title, assignee (teammate name). Only the fields you pass are changed.",
+    description: "Edit an existing task by reference (e.g. TEL-12). Set any of: due_date (YYYY-MM-DD / +Nd / today / tomorrow / weekday, or null to clear), priority (p1/p2/p3), title, assignee (teammate name). Only the fields you pass are changed.",
     schema: { type: "object", properties: { task_ref: { type: "string" }, due_date: { type: ["string", "null"] }, priority: { type: "string", enum: ["p1", "p2", "p3"] }, title: { type: "string" }, assignee: { type: "string" } }, required: ["task_ref"] },
     run: async (a) => {
       const t = await resolveTask(a.task_ref); const patch = {}; const changed = [];
-      if (a.due_date !== undefined) { patch.due_date = a.due_date; changed.push(a.due_date ? "due " + a.due_date : "due date cleared"); }
+      if (a.due_date !== undefined) { patch.due_date = a.due_date === null ? null : parseDate(a.due_date); changed.push(patch.due_date ? "due " + patch.due_date : "due date cleared"); }
       if (a.priority) { patch.priority = a.priority; changed.push(a.priority); }
       if (a.title) { patch.title = a.title; changed.push("renamed"); }
       if (a.assignee) { const p = await resolveAssignee(a.assignee); patch.assignee_id = p.id; changed.push("→ " + p.full_name); }
