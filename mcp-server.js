@@ -362,6 +362,15 @@ const TOOLS = {
     schema: { type: "object", properties: { task_ref: { type: "string" }, urgency: { type: "string", enum: ["normale", "haute", "critique"] } }, required: ["task_ref", "urgency"] },
     run: async (a) => { const t = await resolveTask(a.task_ref); await api(`/rest/v1/rpc/set_task_urgency`, { method: "POST", body: JSON.stringify({ _task_id: t.id, _urgency: a.urgency }) }); return `${t.mission.key}-${t.number} urgency → ${a.urgency}`; },
   },
+  set_task_visibility: {
+    description: "Set whether a task is visible to the client in the customer portal, by task ref (e.g. TEL-12). client:true shows it to the client, false hides it.",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, client: { type: "boolean" } }, required: ["task_ref", "client"] },
+    run: async (a) => {
+      const t = await resolveTask(a.task_ref);
+      await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ is_client_visible: !!a.client }) });
+      return `${t.mission.key}-${t.number} → ${a.client ? "visible to client" : "hidden from client"}`;
+    },
+  },
 
   // ── task relations ──
   link_tasks: {
