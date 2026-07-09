@@ -466,6 +466,21 @@ const TOOLS = {
       return `Uploaded ${filename} to ${m.key} (${Math.max(1, Math.round(buf.length / 1024))}KB · ${vis}).`;
     },
   },
+  delete_file: {
+    description: "Delete a file from a mission by filename (fuzzy). Removes both the stored object and the record. Destructive — confirm the exact file with the user first.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, filename: { type: "string" } }, required: ["mission_key", "filename"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const rows = await api(`/rest/v1/mission_files?select=id,filename,storage_path&mission_id=eq.${m.id}&filename=ilike.*${encodeURIComponent(a.filename)}*`);
+      if (!rows.length) throw new Error(`No file matching "${a.filename}" in ${m.key}.`);
+      if (rows.length > 1) throw new Error(`"${a.filename}" matches ${rows.length} files (${rows.map((r) => r.filename).join(", ")}) — be more specific.`);
+      const f = rows[0];
+      const encPath = f.storage_path.split("/").map(encodeURIComponent).join("/");
+      await api(`/storage/v1/object/mission-files/${encPath}`, { method: "DELETE" }).catch(() => {});
+      await api(`/rest/v1/mission_files?id=eq.${f.id}`, { method: "DELETE" });
+      return `Deleted ${f.filename} from ${m.key}.`;
+    },
+  },
 
   // ── mission members ──
   add_collaborator: {
