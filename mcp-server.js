@@ -79,6 +79,16 @@ async function resolveMessage(term) {
   if (!rows.length) throw new Error(`No email matching "${term}".`);
   return rows[0];
 }
+async function resolvePerso() {
+  const rows = await api(`/rest/v1/missions?select=id,key,name&kind=eq.personal`); // owner-only RLS → returns just mine
+  if (!rows.length) throw new Error("No personal space found for you yet.");
+  return rows[0];
+}
+async function resolveRecipe(title) {
+  const rows = await api(`/rest/v1/recipes?select=id,title,kind,content,is_published&title=ilike.*${encodeURIComponent(title)}*`);
+  if (!rows.length) throw new Error(`No recipe matching "${title}".`);
+  return rows[0];
+}
 // Indented description/note block for list views — carries the context behind a task (esp. head/customer requests).
 const fmtNotes = (t) => {
   const out = [];
@@ -1029,6 +1039,117 @@ const TOOLS = {
       if (!creds.length) throw new Error(`No credential "${a.label}" on ${t.name}.`);
       await api(`/rest/v1/stack_credentials?id=eq.${creds[0].id}`, { method: "DELETE" });
       return `Deleted credential "${creds[0].label}" from ${t.name}.`;
+    },
+  },
+
+  // ── recipes (kitchen) ──
+  list_recipes: {
+    description: "List recipes — your own plus the team's published ones. ◆ published, ◇ private.",
+    schema: { type: "object", properties: {} },
+    run: async () => {
+      const rows = await api(`/rest/v1/recipes?select=title,kind,description,is_published&order=is_published.desc,title.asc`);
+      if (!rows.length) return "No recipes yet.";
+      return rows.map((r) => `  ${r.is_published ? "◆" : "◇"} ${r.title} [${r.kind}]${r.description ? " — " + r.description : ""}`).join("\n");
+    },
+  },
+  show_recipe: {
+    description: "Show a recipe's contents by title (fuzzy).",
+    schema: { type: "object", properties: { title: { type: "string" } }, required: ["title"] },
+    run: async (a) => {
+      const r = await resolveRecipe(a.title);
+      if (r.kind === "note") return `${r.title} (note)${r.is_published ? " · published" : ""}\n\n${(r.content && r.content.body) || ""}`;
+      const tasks = (r.content && r.content.tasks) || [];
+      return `${r.title} (tasks)${r.is_published ? " · published" : ""}\n` + tasks.map((t) => `  • ${t.title}${t.priority ? " [" + t.priority + "]" : ""}`).join("\n");
+    },
+  },
+  add_recipe: {
+    description: "Create a recipe. For a task recipe pass tasks (array of task titles); for a note recipe pass body. Private by default; publish:true shares it with the team.",
+    schema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, tasks: { type: "array", items: { type: "string" } }, body: { type: "string" }, publish: { type: "boolean" } }, required: ["title"] },
+    run: async (a) => {
+      const conf = loadConf();
+      const kind = a.body != null ? "note" : "tasks";
+      const content = kind === "note" ? { body: a.body || "" } : { tasks: (a.tasks || []).map((t) => ({ title: t })) };
+      await api(`/rest/v1/recipes`, { method: "POST", body: JSON.stringify({ title: a.title, description: a.description || null, kind, content, is_published: !!a.publish, owner_profile_id: conf.user_id }) });
+      return `Created ${kind} recipe "${a.title}"${kind === "tasks" ? ` (${(a.tasks || []).length} tasks)` : ""}${a.publish ? " — published" : ""}.`;
+    },
+  },
+  apply_recipe: {
+    description: "Apply a recipe to a mission — materializes its tasks into the mission (or creates its note). recipe by title, mission by key.",
+    schema: { type: "object", properties: { recipe: { type: "string" }, mission_key: { type: "string" } }, required: ["recipe", "mission_key"] },
+    run: async (a) => {
+      const r = await resolveRecipe(a.recipe); const m = await resolveMission(a.mission_key); const conf = loadConf();
+      if (r.kind === "note") {
+        await api(`/rest/v1/mission_notes`, { method: "POST", body: JSON.stringify({ mission_id: m.id, title: r.title, content: (r.content && r.content.body) || "", is_client_visible: false, created_by: conf.user_id }) });
+        return `Added note "${r.title}" to ${m.key}.`;
+      }
+      const tasks = (r.content && r.content.tasks) || [];
+      if (!tasks.length) return `Recipe "${r.title}" has no tasks.`;
+      const rows = tasks.map((t) => ({ mission_id: m.id, title: t.title, priority: t.priority || "p2", tags: t.tags || [], status: "todo", source: "manual", is_client_visible: false, created_by: conf.user_id }));
+      await api(`/rest/v1/tasks`, { method: "POST", body: JSON.stringify(rows) });
+      return `Applied "${r.title}" → created ${rows.length} tasks in ${m.key}.`;
+    },
+  },
+  publish_recipe: {
+    description: "Publish a recipe to the team library (or unpublish with published:false), by title.",
+    schema: { type: "object", properties: { title: { type: "string" }, published: { type: "boolean" } }, required: ["title"] },
+    run: async (a) => {
+      const r = await resolveRecipe(a.title); const pub = a.published !== false;
+      await api(`/rest/v1/recipes?id=eq.${r.id}`, { method: "PATCH", body: JSON.stringify({ is_published: pub }) });
+      return `${r.title} → ${pub ? "published to the team" : "unpublished (private)"}`;
+    },
+  },
+
+  // ── personal space (perso) ──
+  add_perso_task: {
+    description: "Add a private task to your personal space (Perso). priority p1/p2/p3; due_date YYYY-MM-DD / +Nd / weekday.",
+    schema: { type: "object", properties: { title: { type: "string" }, priority: { type: "string", enum: ["p1", "p2", "p3"] }, due_date: { type: "string" } }, required: ["title"] },
+    run: async (a) => {
+      const perso = await resolvePerso(); const conf = loadConf();
+      const body = { mission_id: perso.id, title: a.title, priority: a.priority || "p2", tags: [], status: "todo", source: "manual", is_client_visible: false, created_by: conf.user_id };
+      if (a.due_date) body.due_date = parseDate(a.due_date);
+      await api(`/rest/v1/tasks`, { method: "POST", body: JSON.stringify(body) });
+      return `Added to Perso: ${a.title}`;
+    },
+  },
+  perso_today: {
+    description: "Your open (not done) tasks in your private personal space (Perso).",
+    schema: { type: "object", properties: {} },
+    run: async () => {
+      const perso = await resolvePerso();
+      const rows = await api(`/rest/v1/tasks?select=number,title,status,due_date,priority&mission_id=eq.${perso.id}&status=neq.done&order=due_date.asc.nullslast`);
+      if (!rows.length) return "Perso: nothing open.";
+      return `Perso (${rows.length}):\n` + rows.map((t) => "  " + fmtTask(t)).join("\n");
+    },
+  },
+  add_perso_note: {
+    description: "Add a private note to your personal space (Perso).",
+    schema: { type: "object", properties: { title: { type: "string" }, content: { type: "string" } }, required: ["title", "content"] },
+    run: async (a) => {
+      const perso = await resolvePerso(); const conf = loadConf();
+      await api(`/rest/v1/mission_notes`, { method: "POST", body: JSON.stringify({ mission_id: perso.id, title: a.title, content: a.content, is_client_visible: false, created_by: conf.user_id }) });
+      return `Added Perso note: ${a.title}`;
+    },
+  },
+
+  // ── skills: import from GitHub ──
+  import_skill: {
+    description: "Import a skill from a PUBLIC GitHub URL — a raw SKILL.md URL or a github.com blob URL (auto-converted to raw). Downloads it, parses frontmatter (name/description), adds it to your library. Private by default; publish:true shares it.",
+    schema: { type: "object", properties: { url: { type: "string" }, name: { type: "string" }, publish: { type: "boolean" } }, required: ["url"] },
+    run: async (a) => {
+      let url = a.url.trim();
+      const blob = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/(.+)$/);
+      if (blob) url = `https://raw.githubusercontent.com/${blob[1]}/${blob[2]}/${blob[3]}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Fetch failed (HTTP ${res.status}) — give a public raw SKILL.md URL or a github.com blob URL.`);
+      const content = await res.text();
+      let name = a.name, description = "";
+      const fm = content.match(/^---\n([\s\S]*?)\n---/);
+      if (fm) { const nm = fm[1].match(/^name:\s*(.+)$/m); const dm = fm[1].match(/^description:\s*(.+)$/m); if (nm && !name) name = nm[1].trim().replace(/^["']|["']$/g, ""); if (dm) description = dm[1].trim().replace(/^["']|["']$/g, ""); }
+      if (!name) { const h = content.match(/^#\s+(.+)$/m); name = h ? h[1].trim() : "Imported skill"; }
+      const conf = loadConf();
+      const slug = name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "skill";
+      await api(`/rest/v1/skills`, { method: "POST", body: JSON.stringify({ name, slug, description: description || null, content, is_published: !!a.publish, owner_profile_id: conf.user_id }) });
+      return `Imported "${name}" from GitHub (${content.length} chars)${a.publish ? " — published" : " — private"}.`;
     },
   },
 
