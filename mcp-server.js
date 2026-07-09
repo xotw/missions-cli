@@ -64,6 +64,21 @@ function parseDate(s) {
   throw new Error(`Couldn't read the date "${s}" — use YYYY-MM-DD, +Nd, today/tomorrow, or a weekday.`);
 }
 const fmtTask = (t, withKey) => `${withKey && t.missions ? t.missions.key + "-" + t.number + " " : ""}[${t.status}]${t.priority ? " " + t.priority : ""} ${t.title}${t.due_date ? " (due " + t.due_date + ")" : ""}`;
+async function resolveStackTool(name, mission_key) {
+  let filter = "mission_id=is.null", where = "team stack";
+  if (mission_key) { const m = await resolveMission(mission_key); filter = `mission_id=eq.${m.id}`; where = `${m.key} stack`; }
+  const rows = await api(`/rest/v1/stack_tools?select=id,name&${filter}&name=ilike.*${encodeURIComponent(name)}*`);
+  if (!rows.length) throw new Error(`No tool matching "${name}" in the ${where}.`);
+  if (rows.length > 1) throw new Error(`"${name}" matches several tools (${rows.map((r) => r.name).join(", ")}) — be more specific.`);
+  return rows[0];
+}
+async function resolveMessage(term) {
+  const isId = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(term);
+  const q = isId ? `id=eq.${term}` : `or=(sender_name.ilike.*${encodeURIComponent(term)}*,subject.ilike.*${encodeURIComponent(term)}*)`;
+  const rows = await api(`/rest/v1/messages?select=id,sender_name,subject&${q}&order=sent_at.desc&limit=1`);
+  if (!rows.length) throw new Error(`No email matching "${term}".`);
+  return rows[0];
+}
 // Indented description/note block for list views — carries the context behind a task (esp. head/customer requests).
 const fmtNotes = (t) => {
   const out = [];
@@ -851,6 +866,160 @@ const TOOLS = {
       const pub = a.published !== false;
       await api(`/rest/v1/skills?id=eq.${rows[0].id}`, { method: "PATCH", body: JSON.stringify({ is_published: pub }) });
       return `${rows[0].name} → ${pub ? "published to the team" : "unpublished (private)"}`;
+    },
+  },
+
+  // ── emails (message aggregator) ──
+  list_emails: {
+    description: "List your ranked emails from the aggregator (status=new, highest importance first). Filters: needs_reply (only those needing a reply), category (client/sales/internal/personal/notification), mission_key, limit (default 20).",
+    schema: { type: "object", properties: { needs_reply: { type: "boolean" }, category: { type: "string" }, mission_key: { type: "string" }, limit: { type: "number" } } },
+    run: async (a) => {
+      let q = "status=eq.new";
+      if (a.needs_reply) q += "&needs_reply=eq.true";
+      if (a.category) q += `&category=eq.${a.category}`;
+      if (a.mission_key) { const m = await resolveMission(a.mission_key); q += `&mission_id=eq.${m.id}`; }
+      const rows = await api(`/rest/v1/messages?select=sender_name,subject,importance,needs_reply,category&${q}&order=importance.desc.nullslast&limit=${a.limit || 20}`);
+      if (!rows.length) return "No emails match.";
+      return rows.map((r) => `  ${String(r.importance ?? 0).padStart(3)}${r.needs_reply ? " [reply]" : "       "} ${(r.category || "-").padEnd(6)} ${(r.sender_name || "?").slice(0, 18).padEnd(18)} ${(r.subject || "").slice(0, 44)}`).join("\n");
+    },
+  },
+  show_email: {
+    description: "Show one email in full by search term (sender or subject) or message id.",
+    schema: { type: "object", properties: { email: { type: "string" } }, required: ["email"] },
+    run: async (a) => {
+      const r = await resolveMessage(a.email);
+      const m = (await api(`/rest/v1/messages?select=sender_name,sender_handle,subject,body,preview,importance,needs_reply,category,ai_reason,permalink,sent_at,source_account&id=eq.${r.id}`))[0];
+      return `${m.subject || "(no subject)"}\n  From: ${m.sender_name || "?"} <${m.sender_handle || ""}>  ·  ${String(m.sent_at || "").slice(0, 16)}  ·  ${m.source_account || ""}\n  Score ${m.importance ?? "-"}${m.needs_reply ? " · à répondre" : ""} · ${m.category || "-"}${m.ai_reason ? "\n  Why: " + m.ai_reason : ""}\n\n${(m.body || m.preview || "").slice(0, 4000)}${m.permalink ? "\n\n" + m.permalink : ""}`;
+    },
+  },
+  suggest_reply: {
+    description: "Get an AI-suggested reply draft + key points for an email (by search term or id).",
+    schema: { type: "object", properties: { email: { type: "string" } }, required: ["email"] },
+    run: async (a) => {
+      const r = await resolveMessage(a.email);
+      const out = await api(`/functions/v1/suggest-reply`, { method: "POST", body: JSON.stringify({ message_id: r.id }) });
+      const draft = (out && (out.draft || out.suggestion)) || "";
+      const points = (out && out.points) || [];
+      return `Draft:\n${draft || "(none)"}${points.length ? "\n\nÀ couvrir:\n" + points.map((p) => "  - " + p).join("\n") : ""}`;
+    },
+  },
+  reply_email: {
+    description: "Send a reply to an email (by search term or id) as you, in-thread, via Gmail. Marks it handled. reply_all sends to all thread recipients.",
+    schema: { type: "object", properties: { email: { type: "string" }, body: { type: "string" } }, required: ["email", "body"] },
+    run: async (a) => {
+      const r = await resolveMessage(a.email);
+      await api(`/functions/v1/gmail-send`, { method: "POST", body: JSON.stringify({ message_id: r.id, body: a.body }) });
+      return `Reply sent — ${r.subject || r.sender_name}.`;
+    },
+  },
+  mark_email: {
+    description: "Set an email's status: handled, snoozed, dismissed, or new (by search term or id).",
+    schema: { type: "object", properties: { email: { type: "string" }, status: { type: "string", enum: ["handled", "snoozed", "dismissed", "new"] } }, required: ["email", "status"] },
+    run: async (a) => {
+      const r = await resolveMessage(a.email);
+      await api(`/rest/v1/messages?id=eq.${r.id}`, { method: "PATCH", body: JSON.stringify({ status: a.status }) });
+      return `${r.subject || r.sender_name} → ${a.status}`;
+    },
+  },
+  delete_email: {
+    description: "Delete an email from the aggregator (by search term or id). Destructive.",
+    schema: { type: "object", properties: { email: { type: "string" } }, required: ["email"] },
+    run: async (a) => {
+      const r = await resolveMessage(a.email);
+      await api(`/rest/v1/messages?id=eq.${r.id}`, { method: "DELETE" });
+      return `Deleted email: ${r.subject || r.sender_name}.`;
+    },
+  },
+
+  // ── playbook authoring ──
+  add_playbook: {
+    description: "Create a new playbook.",
+    schema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" } }, required: ["title"] },
+    run: async (a) => {
+      const conf = loadConf();
+      await api(`/rest/v1/playbooks`, { method: "POST", body: JSON.stringify({ title: a.title, description: a.description || null, created_by: conf.user_id, owner_id: conf.user_id }) });
+      return `Created playbook "${a.title}".`;
+    },
+  },
+  add_playbook_step: {
+    description: "Add a step to a playbook (found by title, fuzzy). Appended at the end.",
+    schema: { type: "object", properties: { playbook: { type: "string" }, title: { type: "string" }, description: { type: "string" }, prompt: { type: "string" }, tips: { type: "string" } }, required: ["playbook", "title"] },
+    run: async (a) => {
+      const pbs = await api(`/rest/v1/playbooks?select=id,title&title=ilike.*${encodeURIComponent(a.playbook)}*`);
+      if (!pbs.length) throw new Error(`No playbook matching "${a.playbook}".`);
+      const pb = pbs[0];
+      const last = await api(`/rest/v1/playbook_steps?select=position&playbook_id=eq.${pb.id}&order=position.desc&limit=1`);
+      const pos = (last[0] ? last[0].position : 0) + 1;
+      const payload = { playbook_id: pb.id, position: pos, title: a.title };
+      if (a.description) payload.description = a.description;
+      if (a.prompt) payload.prompt = a.prompt;
+      if (a.tips) payload.tips = a.tips;
+      await api(`/rest/v1/playbook_steps`, { method: "POST", body: JSON.stringify(payload) });
+      return `Added step ${pos} "${a.title}" to ${pb.title}.`;
+    },
+  },
+
+  // ── recap ──
+  recap: {
+    description: "What got shipped: tasks completed in the last N days (default 7), grouped by mission.",
+    schema: { type: "object", properties: { days: { type: "number" } } },
+    run: async (a) => {
+      const days = a.days || 7; const since = new Date(Date.now() - days * 864e5).toISOString();
+      const rows = await api(`/rest/v1/tasks?select=title,missions!inner(key)&status=eq.done&done_at=gte.${since}&order=done_at.desc&limit=200`);
+      if (!rows.length) return `Nothing completed in the last ${days} day(s).`;
+      const byM = {};
+      for (const t of rows) { const k = t.missions ? t.missions.key : "—"; (byM[k] = byM[k] || []).push(t.title); }
+      return `Recap — last ${days}d (${rows.length} livrés)\n` + Object.entries(byM).map(([k, ts]) => `${k} (${ts.length})\n` + ts.map((t) => "  ✓ " + t).join("\n")).join("\n\n");
+    },
+  },
+
+  // ── stack edit / delete ──
+  update_stack_tool: {
+    description: "Edit a stack tool (by name; no mission_key = general team stack, with mission_key = that mission's stack). Set any of: url, description, category (enrichment/outbound/crm/infra/ai/other), docs_url, how_to_use, monthly_cost, billing_cycle (monthly/yearly/one_time/free), currency, visible_to_head, visible_to_client.",
+    schema: { type: "object", properties: { tool_name: { type: "string" }, mission_key: { type: "string" }, url: { type: "string" }, description: { type: "string" }, category: { type: "string" }, docs_url: { type: "string" }, how_to_use: { type: "string" }, monthly_cost: { type: "number" }, billing_cycle: { type: "string" }, currency: { type: "string" }, visible_to_head: { type: "boolean" }, visible_to_client: { type: "boolean" } }, required: ["tool_name"] },
+    run: async (a) => {
+      const t = await resolveStackTool(a.tool_name, a.mission_key);
+      const patch = {};
+      for (const k of ["url", "description", "category", "docs_url", "how_to_use", "monthly_cost", "billing_cycle", "currency", "visible_to_head", "visible_to_client"]) if (a[k] !== undefined) patch[k] = a[k];
+      if (a.url) { try { patch.favicon_url = `https://www.google.com/s2/favicons?domain=${new URL(a.url).hostname}&sz=64`; } catch {} }
+      if (!Object.keys(patch).length) throw new Error("Nothing to change.");
+      await api(`/rest/v1/stack_tools?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `Updated ${t.name}: ${Object.keys(patch).filter((k) => k !== "favicon_url").join(", ")}`;
+    },
+  },
+  delete_stack_tool: {
+    description: "Delete a stack tool and its credentials (by name; mission_key for a mission's stack). Destructive.",
+    schema: { type: "object", properties: { tool_name: { type: "string" }, mission_key: { type: "string" } }, required: ["tool_name"] },
+    run: async (a) => {
+      const t = await resolveStackTool(a.tool_name, a.mission_key);
+      await api(`/rest/v1/stack_credentials?tool_id=eq.${t.id}`, { method: "DELETE" }).catch(() => {});
+      await api(`/rest/v1/stack_tools?id=eq.${t.id}`, { method: "DELETE" });
+      return `Deleted ${t.name} and its credentials.`;
+    },
+  },
+  update_stack_credential: {
+    description: "Edit a credential on a stack tool (tool by name, credential by label). Set value, instructions, url, and/or kind (api_key/login/password/workspace_url/token/other).",
+    schema: { type: "object", properties: { tool_name: { type: "string" }, label: { type: "string" }, mission_key: { type: "string" }, value: { type: "string" }, instructions: { type: "string" }, url: { type: "string" }, kind: { type: "string" } }, required: ["tool_name", "label"] },
+    run: async (a) => {
+      const t = await resolveStackTool(a.tool_name, a.mission_key);
+      const creds = await api(`/rest/v1/stack_credentials?select=id,label&tool_id=eq.${t.id}&label=ilike.*${encodeURIComponent(a.label)}*`);
+      if (!creds.length) throw new Error(`No credential "${a.label}" on ${t.name}.`);
+      const patch = {};
+      for (const k of ["value", "instructions", "url", "kind"]) if (a[k] !== undefined) patch[k] = a[k];
+      if (!Object.keys(patch).length) throw new Error("Nothing to change.");
+      await api(`/rest/v1/stack_credentials?id=eq.${creds[0].id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `Updated credential "${creds[0].label}" on ${t.name}.`;
+    },
+  },
+  delete_stack_credential: {
+    description: "Delete a credential from a stack tool (tool by name, credential by label). Destructive.",
+    schema: { type: "object", properties: { tool_name: { type: "string" }, label: { type: "string" }, mission_key: { type: "string" } }, required: ["tool_name", "label"] },
+    run: async (a) => {
+      const t = await resolveStackTool(a.tool_name, a.mission_key);
+      const creds = await api(`/rest/v1/stack_credentials?select=id,label&tool_id=eq.${t.id}&label=ilike.*${encodeURIComponent(a.label)}*`);
+      if (!creds.length) throw new Error(`No credential "${a.label}" on ${t.name}.`);
+      await api(`/rest/v1/stack_credentials?id=eq.${creds[0].id}`, { method: "DELETE" });
+      return `Deleted credential "${creds[0].label}" from ${t.name}.`;
     },
   },
 
