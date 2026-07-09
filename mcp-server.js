@@ -755,6 +755,60 @@ const TOOLS = {
     },
   },
 
+  // ── skills library ──
+  add_skill: {
+    description: "Upload a skill to the Skills library from the terminal. Provide the SKILL.md via `file` (a local path — it is read from disk) or `content` (raw markdown). Private by default; set publish:true to share it with the team. name is required.",
+    schema: { type: "object", properties: { name: { type: "string" }, file: { type: "string" }, content: { type: "string" }, description: { type: "string" }, trigger: { type: "string" }, category: { type: "string" }, arg_hint: { type: "string" }, publish: { type: "boolean" } }, required: ["name"] },
+    run: async (a) => {
+      const conf = loadConf();
+      let content = a.content || "";
+      if (a.file) content = require("fs").readFileSync(a.file.replace(/^~(?=$|\/)/, require("os").homedir()), "utf8");
+      if (!content.trim()) throw new Error("Provide `content` or a `file` path to the SKILL.md.");
+      const slug = a.name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "skill";
+      const payload = { name: a.name, slug, content, is_published: !!a.publish, owner_profile_id: conf.user_id };
+      if (a.description) payload.description = a.description;
+      if (a.trigger) payload.trigger = a.trigger;
+      if (a.category) payload.category = a.category;
+      if (a.arg_hint) payload.arg_hint = a.arg_hint;
+      await api(`/rest/v1/skills`, { method: "POST", body: JSON.stringify(payload) });
+      return `Uploaded skill "${a.name}" (${content.length} chars)${a.publish ? " — published to the team" : " — private"}.`;
+    },
+  },
+  list_skills: {
+    description: "List skills — your own plus the team's published skills. ◆ = published, ◇ = private.",
+    schema: { type: "object", properties: {} },
+    run: async () => {
+      const rows = await api(`/rest/v1/skills?select=name,category,description,is_published&order=is_published.desc,name.asc`);
+      if (!rows.length) return "No skills yet. Upload one with add_skill.";
+      return rows.map((s) => `  ${s.is_published ? "◆" : "◇"} ${s.name}${s.category ? " [" + s.category + "]" : ""}${s.description ? " — " + s.description : ""}`).join("\n");
+    },
+  },
+  show_skill: {
+    description: "Show a skill's full detail and SKILL.md content by name (fuzzy).",
+    schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+    run: async (a) => {
+      const rows = await api(`/rest/v1/skills?select=name,category,description,trigger,arg_hint,content,is_published&name=ilike.*${encodeURIComponent(a.name)}*`);
+      if (!rows.length) throw new Error(`No skill matching "${a.name}".`);
+      const s = rows[0];
+      return `${s.name}${s.category ? " [" + s.category + "]" : ""} · ${s.is_published ? "published" : "private"}`
+        + (s.description ? "\n  " + s.description : "")
+        + (s.trigger ? "\n  Trigger: " + s.trigger : "")
+        + (s.arg_hint ? "\n  Args: " + s.arg_hint : "")
+        + (s.content ? "\n\n" + s.content : "");
+    },
+  },
+  publish_skill: {
+    description: "Publish a skill to the team library (or unpublish with published:false) by name (fuzzy).",
+    schema: { type: "object", properties: { name: { type: "string" }, published: { type: "boolean" } }, required: ["name"] },
+    run: async (a) => {
+      const rows = await api(`/rest/v1/skills?select=id,name&name=ilike.*${encodeURIComponent(a.name)}*`);
+      if (!rows.length) throw new Error(`No skill matching "${a.name}".`);
+      const pub = a.published !== false;
+      await api(`/rest/v1/skills?id=eq.${rows[0].id}`, { method: "PATCH", body: JSON.stringify({ is_published: pub }) });
+      return `${rows[0].name} → ${pub ? "published to the team" : "unpublished (private)"}`;
+    },
+  },
+
   // ── improvements (internal idea log) ──
   log_improvement: {
     description: "Log an improvement idea / feedback for the tools or process.",
