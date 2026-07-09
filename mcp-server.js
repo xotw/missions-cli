@@ -72,6 +72,33 @@ const fmtNotes = (t) => {
   return out.length ? "\n" + out.join("\n") : "";
 };
 
+// ── mission tools (Gantt / RACI) helpers ──
+const uuid = () => require("crypto").randomUUID();
+async function resolveMissionTool(mission_key, title, kind) {
+  const m = await resolveMission(mission_key);
+  const rows = await api(`/rest/v1/mission_tools?select=id,kind,title,data,visible_to_client,editable_by_head&mission_id=eq.${m.id}&title=ilike.*${encodeURIComponent(title)}*${kind ? "&kind=eq." + kind : ""}`);
+  if (!rows.length) throw new Error(`No ${kind || "tool"} matching "${title}" in ${m.key}.`);
+  return { ...rows[0], mission: m };
+}
+function renderRaci(t, flags) {
+  const d = t.data || {}; const cols = d.columns || []; const rows = d.rows || [];
+  if (!rows.length && !cols.length) return `${t.title} (RACI) ${flags}\n  (empty — add deliverables and people)`;
+  const dW = Math.max("Livrable".length, ...rows.map((r) => (r.deliverable || "").length), 1);
+  const cW = cols.map((c) => Math.max((c.name || "").length, 1));
+  const line = (cells) => "  " + String(cells[0]).padEnd(dW) + cells.slice(1).map((v, i) => "  " + String(v).padEnd(cW[i])).join("");
+  const out = [`${t.title} (RACI) ${flags}`, line(["Livrable", ...cols.map((c) => c.name)])];
+  for (const r of rows) out.push(line([r.deliverable, ...cols.map((c) => r.cells[c.id] || "·")]));
+  return out.join("\n");
+}
+function renderGantt(t, flags) {
+  const bars = (t.data && t.data.bars) || [];
+  if (!bars.length) return `${t.title} (GANTT) ${flags}\n  (empty — add tasks)`;
+  const byId = Object.fromEntries(bars.map((b) => [b.id, b.label]));
+  const sorted = [...bars].sort((a, b) => (a.start || "").localeCompare(b.start || ""));
+  const lW = Math.max(...sorted.map((b) => (b.label || "").length), 4);
+  return `${t.title} (GANTT) ${flags}\n` + sorted.map((b) => `  ${(b.label || "").padEnd(lW)}  ${b.start} → ${b.end}  ${String(b.progress || 0).padStart(3)}%${b.deps && b.deps.length ? "  after " + b.deps.map((id) => byId[id] || "?").join(", ") : ""}`).join("\n");
+}
+
 // ── tools ───────────────────────────────────────────────────────────────────
 const TOOLS = {
   list_missions: {
@@ -645,6 +672,86 @@ const TOOLS = {
       for (const r of rows) { const k = r.missions ? r.missions.key : "—"; (byM[k] = byM[k] || []).push(r); }
       const label = (r) => `${String(r.created_at).slice(0, 10)}  ${String(r.action).replace(/_/g, " ")}${r.actor && r.actor.full_name ? " · " + r.actor.full_name : ""}${r.meta && r.meta.title ? " — " + r.meta.title : ""}`;
       return `Activity — last ${days}d (${rows.length})\n` + Object.entries(byM).map(([k, rs]) => `${k}\n` + rs.map((r) => "  " + label(r)).join("\n")).join("\n\n");
+    },
+  },
+
+  // ── mission tools: Gantt & RACI ──
+  list_mission_tools: {
+    description: "List a mission's Gantt charts and RACI tables (with their client/head visibility).",
+    schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const rows = await api(`/rest/v1/mission_tools?select=kind,title,visible_to_client,editable_by_head&mission_id=eq.${m.id}&order=kind.asc,created_at.asc`);
+      if (!rows.length) return `${m.key} — no Gantt/RACI tools yet. Create one with add_mission_tool.`;
+      return `${m.key} — Outils\n` + rows.map((t) => `  [${t.kind.toUpperCase()}] ${t.title}${t.visible_to_client ? " · client" : ""}${t.editable_by_head ? " · head-edit" : ""}`).join("\n");
+    },
+  },
+  show_mission_tool: {
+    description: "Show a mission's Gantt or RACI by title (fuzzy) — renders the full matrix / timeline.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" } }, required: ["mission_key", "title"] },
+    run: async (a) => {
+      const t = await resolveMissionTool(a.mission_key, a.title);
+      const flags = `[${t.visible_to_client ? "client" : "internal"}${t.editable_by_head ? " · head-edit" : ""}]`;
+      return t.kind === "raci" ? renderRaci(t, flags) : renderGantt(t, flags);
+    },
+  },
+  add_mission_tool: {
+    description: "Create a new Gantt chart or RACI table on a mission. kind is 'gantt' or 'raci'.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, kind: { type: "string", enum: ["gantt", "raci"] }, title: { type: "string" } }, required: ["mission_key", "kind", "title"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key); const conf = loadConf();
+      const data = a.kind === "raci" ? { columns: [], rows: [] } : { bars: [] };
+      await api(`/rest/v1/mission_tools`, { method: "POST", body: JSON.stringify({ mission_id: m.id, kind: a.kind, title: a.title, data, created_by: conf.user_id }) });
+      return `Created ${a.kind.toUpperCase()} "${a.title}" on ${m.key}.`;
+    },
+  },
+  raci_set: {
+    description: "Set a RACI cell: the role (R/A/C/I, or empty to clear) for a person on a deliverable. Auto-creates the deliverable row and/or the person column if missing — build the matrix incrementally by calling this repeatedly.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, deliverable: { type: "string" }, person: { type: "string" }, role: { type: "string", enum: ["R", "A", "C", "I", ""] } }, required: ["mission_key", "title", "deliverable", "person", "role"] },
+    run: async (a) => {
+      const t = await resolveMissionTool(a.mission_key, a.title, "raci");
+      const data = (t.data && t.data.columns) ? t.data : { columns: [], rows: [] };
+      let col = data.columns.find((c) => (c.name || "").toLowerCase() === a.person.toLowerCase());
+      if (!col) { col = { id: uuid(), name: a.person, role: "" }; data.columns.push(col); }
+      let row = data.rows.find((r) => (r.deliverable || "").toLowerCase() === a.deliverable.toLowerCase());
+      if (!row) { row = { id: uuid(), deliverable: a.deliverable, cells: {} }; data.rows.push(row); }
+      if (a.role === "") delete row.cells[col.id]; else row.cells[col.id] = a.role;
+      await api(`/rest/v1/mission_tools?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ data }) });
+      return `${t.mission.key} · ${t.title}: ${a.deliverable} × ${a.person} = ${a.role || "(cleared)"}`;
+    },
+  },
+  gantt_set_task: {
+    description: "Add or update a Gantt task/bar by label. Dates YYYY-MM-DD; progress 0-100; depends_on is the label of another task in this chart (dependents auto-shift in the app UI).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, label: { type: "string" }, start: { type: "string" }, end: { type: "string" }, progress: { type: "number" }, depends_on: { type: "string" } }, required: ["mission_key", "title", "label", "start", "end"] },
+    run: async (a) => {
+      const t = await resolveMissionTool(a.mission_key, a.title, "gantt");
+      const data = (t.data && t.data.bars) ? t.data : { bars: [] };
+      let bar = data.bars.find((b) => (b.label || "").toLowerCase() === a.label.toLowerCase());
+      if (!bar) { bar = { id: uuid(), label: a.label, start: a.start, end: a.end, progress: a.progress || 0, deps: [] }; data.bars.push(bar); }
+      else { bar.start = a.start; bar.end = a.end; if (a.progress != null) bar.progress = a.progress; }
+      if (a.depends_on) { const dep = data.bars.find((b) => (b.label || "").toLowerCase() === a.depends_on.toLowerCase()); if (dep && dep.id !== bar.id && !bar.deps.includes(dep.id)) bar.deps.push(dep.id); }
+      await api(`/rest/v1/mission_tools?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ data }) });
+      return `${t.mission.key} · ${t.title}: ${a.label} ${a.start} → ${a.end} (${a.progress || 0}%)${a.depends_on ? " after " + a.depends_on : ""}`;
+    },
+  },
+  set_tool_visibility: {
+    description: "Toggle a mission tool's visibility: client (visible to the customer in the portal) and/or head_editable (the head of mission can edit it).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, client: { type: "boolean" }, head_editable: { type: "boolean" } }, required: ["mission_key", "title"] },
+    run: async (a) => {
+      const t = await resolveMissionTool(a.mission_key, a.title);
+      const patch = {}; if (a.client != null) patch.visible_to_client = a.client; if (a.head_editable != null) patch.editable_by_head = a.head_editable;
+      if (!Object.keys(patch).length) throw new Error("Nothing to change — pass client and/or head_editable.");
+      await api(`/rest/v1/mission_tools?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `${t.mission.key} · ${t.title}: ${Object.entries(patch).map(([k, v]) => k + "=" + v).join(", ")}`;
+    },
+  },
+  delete_mission_tool: {
+    description: "Delete a Gantt or RACI from a mission by title (fuzzy). Destructive — confirm the title with the user first.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" } }, required: ["mission_key", "title"] },
+    run: async (a) => {
+      const t = await resolveMissionTool(a.mission_key, a.title);
+      await api(`/rest/v1/mission_tools?id=eq.${t.id}`, { method: "DELETE" });
+      return `Deleted ${t.kind.toUpperCase()} "${t.title}" from ${t.mission.key}.`;
     },
   },
 
