@@ -390,6 +390,36 @@ const TOOLS = {
   Links: ${links}`;
     },
   },
+  update_mission: {
+    description: "Edit a mission's fields by key. Set any of: name, status (active/paused/completed/archived), phase (e.g. setup/live), head (a teammate's name — assigns the head of mission; empty string clears it), client_company, start_date, end_date (YYYY-MM-DD / +Nd / weekday, or null to clear), goal, slack_url, notion_url, dashboard_url, customer_language (fr/en — drives portal + client emails), mission_type, visibility (team/private), color (#hex). Only the fields you pass change.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, name: { type: "string" }, status: { type: "string" }, phase: { type: "string" }, head: { type: "string" }, client_company: { type: "string" }, start_date: { type: ["string", "null"] }, end_date: { type: ["string", "null"] }, goal: { type: "string" }, slack_url: { type: "string" }, notion_url: { type: "string" }, dashboard_url: { type: "string" }, customer_language: { type: "string", enum: ["fr", "en"] }, mission_type: { type: "string" }, visibility: { type: "string", enum: ["team", "private"] }, color: { type: "string" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const patch = {};
+      if (a.name != null) patch.name = a.name;
+      if (a.status) patch.status = a.status;
+      if (a.phase) patch.phase = a.phase;
+      if (a.head !== undefined) {
+        if (!a.head) { patch.head_profile_id = null; patch.head_name = null; }
+        else { const p = await resolveAssignee(a.head); patch.head_profile_id = p.id; patch.head_name = p.full_name; }
+      }
+      if (a.client_company != null) patch.client_company = a.client_company;
+      if (a.start_date !== undefined) patch.start_date = a.start_date ? parseDate(a.start_date) : null;
+      if (a.end_date !== undefined) patch.end_date = a.end_date ? parseDate(a.end_date) : null;
+      if (a.goal != null) patch.goal = a.goal;
+      if (a.slack_url != null) patch.slack_url = a.slack_url;
+      if (a.notion_url != null) patch.notion_url = a.notion_url;
+      if (a.dashboard_url != null) patch.dashboard_url = a.dashboard_url;
+      if (a.customer_language) patch.customer_language = a.customer_language;
+      if (a.mission_type) patch.mission_type = a.mission_type;
+      if (a.visibility) patch.visibility = a.visibility;
+      if (a.color) patch.color = a.color;
+      if (!Object.keys(patch).length) throw new Error("Nothing to change — pass at least one field to edit.");
+      await api(`/rest/v1/missions?id=eq.${m.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      const changed = [...new Set(Object.keys(patch).map((k) => k === "head_profile_id" || k === "head_name" ? "head" : k))];
+      return `${m.key} updated: ${changed.join(", ")}`;
+    },
+  },
   list_notes: {
     description: "List the notes on a mission (by key).",
     schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
