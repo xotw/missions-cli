@@ -89,6 +89,20 @@ async function resolveRecipe(title) {
   if (!rows.length) throw new Error(`No recipe matching "${title}".`);
   return rows[0];
 }
+async function resolveEvent(term) {
+  const now = new Date();
+  const out = await api(`/functions/v1/gcal-events`, { method: "POST", body: JSON.stringify({ start: new Date(now.getTime() - 7 * 864e5).toISOString(), end: new Date(now.getTime() + 30 * 864e5).toISOString() }) });
+  const arr = Array.isArray(out) ? out : (out.events || (out.data && out.data.events) || []);
+  const match = arr.find((e) => (e.title || e.summary || "").toLowerCase().includes(term.toLowerCase()));
+  if (!match) throw new Error(`No event matching "${term}" in the next 30 days.`);
+  return match;
+}
+async function resolveNote(mission_key, title) {
+  const m = await resolveMission(mission_key);
+  const rows = await api(`/rest/v1/mission_notes?select=id,title&mission_id=eq.${m.id}&title=ilike.*${encodeURIComponent(title)}*`);
+  if (!rows.length) throw new Error(`No note matching "${title}" in ${m.key}.`);
+  return { ...rows[0], mission: m };
+}
 // Indented description/note block for list views — carries the context behind a task (esp. head/customer requests).
 const fmtNotes = (t) => {
   const out = [];
@@ -1150,6 +1164,65 @@ const TOOLS = {
       const slug = name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "skill";
       await api(`/rest/v1/skills`, { method: "POST", body: JSON.stringify({ name, slug, description: description || null, content, is_published: !!a.publish, owner_profile_id: conf.user_id }) });
       return `Imported "${name}" from GitHub (${content.length} chars)${a.publish ? " — published" : " — private"}.`;
+    },
+  },
+
+  // ── calendar write (edit / delete / RSVP) ──
+  update_event: {
+    description: "Edit a Google Calendar event (found by title, fuzzy, within the next 30 days). Set title, start, end (ISO datetimes), and/or description. Guests are notified.",
+    schema: { type: "object", properties: { event: { type: "string" }, title: { type: "string" }, start: { type: "string" }, end: { type: "string" }, description: { type: "string" } }, required: ["event"] },
+    run: async (a) => {
+      const ev = await resolveEvent(a.event);
+      const body = { action: "update", event_id: ev.id };
+      if (a.title != null) body.title = a.title;
+      if (a.start) body.start = a.start;
+      if (a.end) body.end = a.end;
+      if (a.description != null) body.description = a.description;
+      await api(`/functions/v1/gcal-write`, { method: "POST", body: JSON.stringify(body) });
+      return `Updated event "${ev.title || ev.summary}".`;
+    },
+  },
+  delete_event: {
+    description: "Delete a Google Calendar event (found by title, fuzzy, within the next 30 days). Guests are notified. Destructive — confirm the event with the user first.",
+    schema: { type: "object", properties: { event: { type: "string" } }, required: ["event"] },
+    run: async (a) => {
+      const ev = await resolveEvent(a.event);
+      await api(`/functions/v1/gcal-write`, { method: "POST", body: JSON.stringify({ action: "delete", event_id: ev.id }) });
+      return `Deleted event "${ev.title || ev.summary}".`;
+    },
+  },
+  respond_event: {
+    description: "RSVP to a Google Calendar invite (found by title): accepted, declined, or tentative.",
+    schema: { type: "object", properties: { event: { type: "string" }, response: { type: "string", enum: ["accepted", "declined", "tentative"] } }, required: ["event", "response"] },
+    run: async (a) => {
+      const ev = await resolveEvent(a.event);
+      await api(`/functions/v1/gcal-write`, { method: "POST", body: JSON.stringify({ action: "respond", event_id: ev.id, response: a.response }) });
+      return `RSVP "${ev.title || ev.summary}" → ${a.response}.`;
+    },
+  },
+
+  // ── notes edit / delete ──
+  update_note: {
+    description: "Edit a mission note (found by title within the mission). Set new_title and/or content, and/or client_visible.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, new_title: { type: "string" }, content: { type: "string" }, client_visible: { type: "boolean" } }, required: ["mission_key", "title"] },
+    run: async (a) => {
+      const n = await resolveNote(a.mission_key, a.title);
+      const patch = {};
+      if (a.new_title != null) patch.title = a.new_title;
+      if (a.content != null) patch.content = a.content;
+      if (a.client_visible !== undefined) patch.is_client_visible = a.client_visible;
+      if (!Object.keys(patch).length) throw new Error("Nothing to change.");
+      await api(`/rest/v1/mission_notes?id=eq.${n.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `Updated note "${n.title}" in ${n.mission.key}.`;
+    },
+  },
+  delete_note: {
+    description: "Delete a mission note by title (fuzzy). Destructive.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" } }, required: ["mission_key", "title"] },
+    run: async (a) => {
+      const n = await resolveNote(a.mission_key, a.title);
+      await api(`/rest/v1/mission_notes?id=eq.${n.id}`, { method: "DELETE" });
+      return `Deleted note "${n.title}" from ${n.mission.key}.`;
     },
   },
 

@@ -1,6 +1,6 @@
 {
   "generated_from": "mcp-server.js",
-  "tool_count": 83,
+  "tool_count": 88,
   "groups": {
     "tools": [
       {
@@ -360,6 +360,34 @@
         "description": "Import a skill from a PUBLIC GitHub URL — a raw SKILL.md URL or a github.com blob URL (auto-converted to raw). Downloads it, parses frontmatter (name/description), adds it to your library. Private by default; publish:true shares it."
       }
     ],
+    "calendar write": [
+      {
+        "name": "update_event",
+        "description": "Edit a Google Calendar event (found by title, fuzzy, within the next 30 days). Set title, start, end (ISO datetimes), and/or description. Guests are notified."
+      },
+      {
+        "name": "delete_event",
+        "description": "Delete a Google Calendar event (found by title, fuzzy, within the next 30 days). Guests are notified. Destructive — confirm the event with the user first."
+      },
+      {
+        "name": "respond_event",
+        "description": "RSVP to a Google Calendar invite (found by title): accepted, declined, or tentative."
+      },
+      {
+        "name": "create_event",
+        "description": "Create a Google Calendar event on your calendar. start/end are ISO datetimes (e.g. 2026-07-10T15:00:00). guests is an array of emails. Invitees are notified."
+      }
+    ],
+    "notes edit / delete": [
+      {
+        "name": "update_note",
+        "description": "Edit a mission note (found by title within the mission). Set new_title and/or content, and/or client_visible."
+      },
+      {
+        "name": "delete_note",
+        "description": "Delete a mission note by title (fuzzy). Destructive."
+      }
+    ],
     "improvements": [
       {
         "name": "log_improvement",
@@ -368,12 +396,6 @@
       {
         "name": "list_improvements",
         "description": "List logged improvement ideas."
-      }
-    ],
-    "calendar write": [
-      {
-        "name": "create_event",
-        "description": "Create a Google Calendar event on your calendar. start/end are ISO datetimes (e.g. 2026-07-10T15:00:00). guests is an array of emails. Invitees are notified."
       }
     ]
   }
