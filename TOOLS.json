@@ -1,0 +1,380 @@
+{
+  "generated_from": "mcp-server.js",
+  "tool_count": 83,
+  "groups": {
+    "tools": [
+      {
+        "name": "list_missions",
+        "description": "List all projects/missions the user can access, grouped by kind (client missions, internal builds, team projects)."
+      },
+      {
+        "name": "list_tasks",
+        "description": "List tasks of one mission by its key (e.g. TEL, MODJ). Set include_done to also show completed tasks."
+      },
+      {
+        "name": "today",
+        "description": "MY tasks due today or overdue (assigned to me). To see a whole mission's tasks incl. others' or unassigned work, use list_tasks by mission name."
+      },
+      {
+        "name": "my_tasks",
+        "description": "Open tasks assigned to the current user, across all their missions."
+      },
+      {
+        "name": "add_task",
+        "description": "Create a task in a mission. priority p1/p2/p3; due_date (YYYY-MM-DD, +Nd, today/tomorrow, or a weekday like Friday); assignee is a teammate's name (matched fuzzily); tags is an array of strings."
+      },
+      {
+        "name": "update_task",
+        "description": "Edit an existing task by reference (e.g. TEL-12). Set any of: due_date (YYYY-MM-DD / +Nd / today / tomorrow / weekday, or null to clear), priority (p1/p2/p3), title, assignee (teammate name). Only the fields you pass are changed."
+      },
+      {
+        "name": "complete_task",
+        "description": "Mark a task done by its reference (e.g. TEL-12)."
+      },
+      {
+        "name": "start_task",
+        "description": "Move a task to 'doing' by its reference (e.g. TEL-12)."
+      },
+      {
+        "name": "postpone_task",
+        "description": "Change a task's due date. 'when' is +Nd (e.g. +3d), 'monday', or a YYYY-MM-DD date. Increments the postpone count."
+      },
+      {
+        "name": "comment_task",
+        "description": "Add a comment to a task. Set is_question true to flag it as a question (routes to the admin inbox with attribution)."
+      },
+      {
+        "name": "new_mission",
+        "description": "Create a new project. kind is 'client' (client mission), 'internal' (internal build), or 'team' (shared team project). key is an optional 3-letter uppercase code."
+      },
+      {
+        "name": "log_extra_hours",
+        "description": "Log extra work hours (evenings/weekends — always counted as production). Optionally attribute to a mission key."
+      },
+      {
+        "name": "calendar",
+        "description": "Your Google Calendar events for the next N days (default 7). Shows time, title, and attendee count."
+      },
+      {
+        "name": "upcoming_meetings",
+        "description": "Your upcoming meetings (calendar events that have other attendees) for the next N days (default 3)."
+      },
+      {
+        "name": "inbox",
+        "description": "Your triage inbox: pending client requests and open questions awaiting a decision, with their urgency."
+      },
+      {
+        "name": "list_comments",
+        "description": "Read the comments/discussion thread on a task by its reference (e.g. TEL-12)."
+      },
+      {
+        "name": "show_task",
+        "description": "Show one task in full — its description/notes, status, priority, urgency, due date, assignee, provenance (source) and the comment thread. Use this to read the context behind a task, especially head-of-mission and customer requests."
+      },
+      {
+        "name": "accept_request",
+        "description": "Accept a client request from the inbox (task ref). Optionally set priority (p1/p2/p3) and a due date (YYYY-MM-DD)."
+      },
+      {
+        "name": "postpone_request",
+        "description": "Postpone a client request with a written reason and a resurface date (when: +Nd, monday, or YYYY-MM-DD). The reason is shown to the client."
+      },
+      {
+        "name": "decline_request",
+        "description": "Decline a client request. Reason is optional (e.g. 'Doublon'). Shown to the client if given."
+      },
+      {
+        "name": "delete_task",
+        "description": "Permanently delete a task (DESTRUCTIVE, no undo). ALWAYS confirm the exact task with the user first. Without confirm=true this returns a preview instead of deleting — never pass confirm=true unless the user has explicitly agreed to delete this specific task."
+      },
+      {
+        "name": "set_urgency",
+        "description": "Set a task's urgency: normale, haute, or critique."
+      },
+      {
+        "name": "set_task_visibility",
+        "description": "Set whether a task is visible to the client in the customer portal, by task ref (e.g. TEL-12). client:true shows it to the client, false hides it."
+      }
+    ],
+    "task relations": [
+      {
+        "name": "link_tasks",
+        "description": "Create a relation between two tasks. type 'blocks' means task_ref blocks other_ref; type 'related' links them."
+      },
+      {
+        "name": "show_relations",
+        "description": "Show what a task blocks, what blocks it, and related tasks."
+      }
+    ],
+    "mission detail + notes": [
+      {
+        "name": "show_mission",
+        "description": "Full detail of one mission by key: client, head, dates, goal, status, links, team members, and task counts."
+      },
+      {
+        "name": "update_mission",
+        "description": "Edit a mission's fields by key. Set any of: name, status (active/paused/completed/archived), phase (e.g. setup/live), head (a teammate's name — assigns the head of mission; empty string clears it), client_company, start_date, end_date (YYYY-MM-DD / +Nd / weekday, or null to clear), goal, slack_url, notion_url, dashboard_url, customer_language (fr/en — drives portal + client emails), mission_type, visibility (team/private), color (#hex). Only the fields you pass change."
+      },
+      {
+        "name": "list_notes",
+        "description": "List the notes on a mission (by key)."
+      },
+      {
+        "name": "add_note",
+        "description": "Add a note to a mission. client_visible defaults false (internal)."
+      }
+    ],
+    "mission files": [
+      {
+        "name": "list_files",
+        "description": "List the files attached to a mission (by key): filename, size, type, and who can see them (head/client)."
+      },
+      {
+        "name": "get_file",
+        "description": "Get a temporary download link for a mission file, matched by filename (fuzzy). The link expires in 5 minutes."
+      },
+      {
+        "name": "upload_file",
+        "description": "Upload a local file to a mission. file_path is a path on the user's machine. By default the file is internal; set visible_to_head / visible_to_client to share it. Confirm the path with the user if unsure."
+      },
+      {
+        "name": "delete_file",
+        "description": "Delete a file from a mission by filename (fuzzy). Removes both the stored object and the record. Destructive — confirm the exact file with the user first."
+      }
+    ],
+    "mission members": [
+      {
+        "name": "add_collaborator",
+        "description": "Add a teammate (by name) as a collaborator on a mission. Owner/admin only (enforced by permissions)."
+      },
+      {
+        "name": "request_access",
+        "description": "Request access to a mission you're not a member of (by key). Notifies the owner."
+      }
+    ],
+    "head requests": [
+      {
+        "name": "create_request",
+        "description": "Create a request to the mission's engineer (used by heads of mission). kind: 'task' (do this), 'question', or 'meeting'. 'when' is free text like 'demain' or 'avant vendredi'. Lands in the engineer's inbox."
+      },
+      {
+        "name": "reply_request",
+        "description": "Reply to an open head request on a mission, matched by a phrase in its title."
+      },
+      {
+        "name": "resolve_request",
+        "description": "Mark an open head request resolved (matched by a phrase in its title)."
+      }
+    ],
+    "time summary": [
+      {
+        "name": "time_summary",
+        "description": "This week's time: meeting hours (from calendar) vs production, extra hours logged, and the production ratio (target ≥ 66%)."
+      }
+    ],
+    "playbooks": [
+      {
+        "name": "list_playbooks",
+        "description": "List available playbooks (methodologies)."
+      },
+      {
+        "name": "show_playbook",
+        "description": "Show a playbook's steps by title (fuzzy match)."
+      },
+      {
+        "name": "apply_playbook",
+        "description": "Apply a playbook to a mission — creates its steps as tasks in that mission. playbook by title (fuzzy), mission by key."
+      }
+    ],
+    "stack": [
+      {
+        "name": "list_stack",
+        "description": "List a tool stack, grouped by category. No argument → the global team stack (Bulldozer's own tools). With mission_key → that mission's customer stack (the tools the client uses)."
+      },
+      {
+        "name": "show_tool",
+        "description": "Show a stack tool's full detail + credentials by name (fuzzy). No mission_key → global team stack; with mission_key → that mission's customer stack. Shows head/client visibility, who uses it, and each credential's fill status (filled value vs awaiting the client). Credentials are returned only if your role allows it (RLS: admin, or engineer assigned to that mission)."
+      },
+      {
+        "name": "add_stack_tool",
+        "description": "Add a tool to a stack. No mission_key → the global team stack (Bulldozer's own tools — you can set monthly_cost/billing_cycle/currency). With mission_key → that mission's customer stack. category: enrichment/outbound/crm/infra/ai/other. Requires admin, or an engineer assigned to the mission."
+      },
+      {
+        "name": "add_stack_credential",
+        "description": "Add a credential to a stack tool (found by name). No mission_key → searches the global team stack; with mission_key → that mission's stack. kind is api_key/login/password/workspace_url/token/other. Leave value empty on a mission tool to create a client-fill slot — set instructions. Requires admin, or an engineer on the mission."
+      }
+    ],
+    "activity": [
+      {
+        "name": "activity",
+        "description": "Recent activity across missions (tasks created/completed/postponed/deleted, triage decisions), grouped by mission — the source for a weekly recap. Optional mission_key to scope; days sets the window (default 7)."
+      }
+    ],
+    "mission tools: Gantt & RACI": [
+      {
+        "name": "list_mission_tools",
+        "description": "List a mission's Gantt charts and RACI tables (with their client/head visibility)."
+      },
+      {
+        "name": "show_mission_tool",
+        "description": "Show a mission's Gantt or RACI by title (fuzzy) — renders the full matrix / timeline."
+      },
+      {
+        "name": "add_mission_tool",
+        "description": "Create a new Gantt chart or RACI table on a mission. kind is 'gantt' or 'raci'."
+      },
+      {
+        "name": "raci_set",
+        "description": "Set a RACI cell: the role (R/A/C/I, or empty to clear) for a person on a deliverable. Auto-creates the deliverable row and/or the person column if missing — build the matrix incrementally by calling this repeatedly."
+      },
+      {
+        "name": "gantt_set_task",
+        "description": "Add or update a Gantt task/bar by label. Dates YYYY-MM-DD; progress 0-100; depends_on is the label of another task in this chart (dependents auto-shift in the app UI)."
+      },
+      {
+        "name": "set_tool_visibility",
+        "description": "Toggle a mission tool's visibility: client (visible to the customer in the portal) and/or head_editable (the head of mission can edit it)."
+      },
+      {
+        "name": "delete_mission_tool",
+        "description": "Delete a Gantt or RACI from a mission by title (fuzzy). Destructive — confirm the title with the user first."
+      }
+    ],
+    "skills library": [
+      {
+        "name": "add_skill",
+        "description": "Upload a skill to the Skills library from the terminal. Provide the SKILL.md via `file` (a local path — it is read from disk) or `content` (raw markdown). Private by default; set publish:true to share it with the team. name is required."
+      },
+      {
+        "name": "list_skills",
+        "description": "List skills — your own plus the team's published skills. ◆ = published, ◇ = private."
+      },
+      {
+        "name": "show_skill",
+        "description": "Show a skill's full detail and SKILL.md content by name (fuzzy)."
+      },
+      {
+        "name": "publish_skill",
+        "description": "Publish a skill to the team library (or unpublish with published:false) by name (fuzzy)."
+      }
+    ],
+    "emails": [
+      {
+        "name": "list_emails",
+        "description": "List your ranked emails from the aggregator (status=new, highest importance first). Filters: needs_reply (only those needing a reply), category (client/sales/internal/personal/notification), mission_key, limit (default 20)."
+      },
+      {
+        "name": "show_email",
+        "description": "Show one email in full by search term (sender or subject) or message id."
+      },
+      {
+        "name": "suggest_reply",
+        "description": "Get an AI-suggested reply draft + key points for an email (by search term or id)."
+      },
+      {
+        "name": "reply_email",
+        "description": "Send a reply to an email (by search term or id) as you, in-thread, via Gmail. Marks it handled. reply_all sends to all thread recipients."
+      },
+      {
+        "name": "mark_email",
+        "description": "Set an email's status: handled, snoozed, dismissed, or new (by search term or id)."
+      },
+      {
+        "name": "delete_email",
+        "description": "Delete an email from the aggregator (by search term or id). Destructive."
+      }
+    ],
+    "playbook authoring": [
+      {
+        "name": "add_playbook",
+        "description": "Create a new playbook."
+      },
+      {
+        "name": "add_playbook_step",
+        "description": "Add a step to a playbook (found by title, fuzzy). Appended at the end."
+      }
+    ],
+    "recap": [
+      {
+        "name": "recap",
+        "description": "What got shipped: tasks completed in the last N days (default 7), grouped by mission."
+      }
+    ],
+    "stack edit / delete": [
+      {
+        "name": "update_stack_tool",
+        "description": "Edit a stack tool (by name; no mission_key = general team stack, with mission_key = that mission's stack). Set any of: url, description, category (enrichment/outbound/crm/infra/ai/other), docs_url, how_to_use, monthly_cost, billing_cycle (monthly/yearly/one_time/free), currency, visible_to_head, visible_to_client."
+      },
+      {
+        "name": "delete_stack_tool",
+        "description": "Delete a stack tool and its credentials (by name; mission_key for a mission's stack). Destructive."
+      },
+      {
+        "name": "update_stack_credential",
+        "description": "Edit a credential on a stack tool (tool by name, credential by label). Set value, instructions, url, and/or kind (api_key/login/password/workspace_url/token/other)."
+      },
+      {
+        "name": "delete_stack_credential",
+        "description": "Delete a credential from a stack tool (tool by name, credential by label). Destructive."
+      }
+    ],
+    "recipes": [
+      {
+        "name": "list_recipes",
+        "description": "List recipes — your own plus the team's published ones. ◆ published, ◇ private."
+      },
+      {
+        "name": "show_recipe",
+        "description": "Show a recipe's contents by title (fuzzy)."
+      },
+      {
+        "name": "add_recipe",
+        "description": "Create a recipe. For a task recipe pass tasks (array of task titles); for a note recipe pass body. Private by default; publish:true shares it with the team."
+      },
+      {
+        "name": "apply_recipe",
+        "description": "Apply a recipe to a mission — materializes its tasks into the mission (or creates its note). recipe by title, mission by key."
+      },
+      {
+        "name": "publish_recipe",
+        "description": "Publish a recipe to the team library (or unpublish with published:false), by title."
+      }
+    ],
+    "personal space": [
+      {
+        "name": "add_perso_task",
+        "description": "Add a private task to your personal space (Perso). priority p1/p2/p3; due_date YYYY-MM-DD / +Nd / weekday."
+      },
+      {
+        "name": "perso_today",
+        "description": "Your open (not done) tasks in your private personal space (Perso)."
+      },
+      {
+        "name": "add_perso_note",
+        "description": "Add a private note to your personal space (Perso)."
+      }
+    ],
+    "skills: import from GitHub": [
+      {
+        "name": "import_skill",
+        "description": "Import a skill from a PUBLIC GitHub URL — a raw SKILL.md URL or a github.com blob URL (auto-converted to raw). Downloads it, parses frontmatter (name/description), adds it to your library. Private by default; publish:true shares it."
+      }
+    ],
+    "improvements": [
+      {
+        "name": "log_improvement",
+        "description": "Log an improvement idea / feedback for the tools or process."
+      },
+      {
+        "name": "list_improvements",
+        "description": "List logged improvement ideas."
+      }
+    ],
+    "calendar write": [
+      {
+        "name": "create_event",
+        "description": "Create a Google Calendar event on your calendar. start/end are ISO datetimes (e.g. 2026-07-10T15:00:00). guests is an array of emails. Invitees are notified."
+      }
+    ]
+  }
+}
