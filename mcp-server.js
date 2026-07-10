@@ -51,6 +51,12 @@ async function resolveAssignee(name) {
   return rows[0];
 }
 // Accepts YYYY-MM-DD, +Nd, today/tomorrow (FR/EN), or a weekday name (FR/EN). Returns YYYY-MM-DD or throws.
+function mondayOf(d) {
+  const x = new Date(d); const day = (x.getDay() + 6) % 7; // 0 = Monday
+  x.setDate(x.getDate() - day);
+  return x.toISOString().slice(0, 10);
+}
+
 function parseDate(s) {
   const t = String(s).trim().toLowerCase();
   if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
@@ -627,11 +633,81 @@ const TOOLS = {
     },
   },
 
+  // ── weekly recap ──
+  weekly_recap: {
+    description: "Show my weekly recap (Done/Todo/Success/Failure) for the current week, or a given week_start (YYYY-MM-DD, a Monday).",
+    schema: { type: "object", properties: { week_start: { type: "string" } }, required: [] },
+    run: async (a) => {
+      const ws = a.week_start || mondayOf(new Date());
+      const conf = loadConf();
+      const rows = await api(`/rest/v1/weekly_recaps?select=week_start,greeting,done,todo,success,failure,signoff,status,updated_at&user_id=eq.${conf.user_id}&week_start=eq.${ws}`);
+      if (!rows.length) return `No recap yet for week of ${ws}. Use set_weekly_recap to draft one.`;
+      const r = rows[0];
+      return [`Week of ${r.week_start} [${r.status}]`, r.greeting || "", "", "*Done*", r.done || "—", "", "*Todo*", r.todo || "—", "", "*Success*", r.success || "—", "", "*Failure*", r.failure || "—", "", r.signoff || ""].join("\n").trim();
+    },
+  },
+  set_weekly_recap: {
+    description: "Create or update my weekly recap. Any of done/todo/success/failure/greeting/signoff (multiline, • bullets). finalize:true marks it final. Targets the current week unless week_start (Monday) is given.",
+    schema: { type: "object", properties: { done: { type: "string" }, todo: { type: "string" }, success: { type: "string" }, failure: { type: "string" }, greeting: { type: "string" }, signoff: { type: "string" }, finalize: { type: "boolean" }, week_start: { type: "string" } }, required: [] },
+    run: async (a) => {
+      const ws = a.week_start || mondayOf(new Date());
+      const conf = loadConf();
+      const patch = {};
+      for (const k of ["done", "todo", "success", "failure", "greeting", "signoff"]) if (a[k] !== undefined) patch[k] = a[k];
+      if (a.finalize) patch.status = "final";
+      const body = { user_id: conf.user_id, week_start: ws, ...patch };
+      const rows = await api(`/rest/v1/weekly_recaps?on_conflict=user_id,week_start`, { method: "POST", body: JSON.stringify(body), headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
+      const r = rows[0];
+      return `Recap ${r.status === "final" ? "finalized" : "saved (draft)"} — week of ${r.week_start}.`;
+    },
+  },
+
+  // ── contacts ──
+  my_contacts: {
+    description: "Search my personal contact book (auto-captured from emails). q filters name/email/domain; team members hidden unless include_team:true.",
+    schema: { type: "object", properties: { q: { type: "string" }, include_team: { type: "boolean" } }, required: [] },
+    run: async (a) => {
+      let path = `/rest/v1/contacts?select=email,display_name,company_domain,interaction_count,last_interaction_at,is_team,mission_ids&order=interaction_count.desc&limit=40`;
+      if (!a.include_team) path += `&is_team=eq.false`;
+      if (a.q) path += `&or=(email.ilike.*${encodeURIComponent(a.q)}*,display_name.ilike.*${encodeURIComponent(a.q)}*,company_domain.ilike.*${encodeURIComponent(a.q)}*)`;
+      const rows = await api(path);
+      if (!rows.length) return "No contacts. Run « Générer les contacts » in the app after importing emails.";
+      return rows.map((c) => `  • ${c.display_name || c.email}  <${c.email}>  ${c.interaction_count} échange${c.interaction_count > 1 ? "s" : ""}${c.is_team ? " [team]" : ""}${(c.mission_ids || []).length ? " · " + c.mission_ids.length + " mission(s)" : ""}`).join("\n");
+    },
+  },
+  mission_contacts: {
+    description: "List a mission's points of contact (curated roster: portal accounts, suggested from emails, manual).",
+    schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const rows = await api(`/rest/v1/mission_contacts?select=email,full_name,role_title,is_primary,source&mission_id=eq.${m.id}&order=is_primary.desc,full_name.asc`);
+      if (!rows.length) return `No contacts on ${m.name} yet.`;
+      return `${m.name} — contacts:\n` + rows.map((c) => `  ${c.is_primary ? "★" : "•"} ${c.full_name || c.email}  <${c.email}>${c.role_title ? "  — " + c.role_title : ""}  [${c.source}]`).join("\n");
+    },
+  },
+
+  // ── kitchen ──
+  kitchen_repos: {
+    description: "List the Kitchen's curated repo registry (templates, tools, engines) with when-to-use descriptions.",
+    schema: { type: "object", properties: {} },
+    run: async () => {
+      const rows = await api(`/rest/v1/kitchen_repos?select=repo_full_name,title,description,kind,tags&order=kind.asc,title.asc`);
+      if (!rows.length) return "No repos in the Kitchen registry.";
+      return rows.map((r) => `  [${r.kind}] ${r.title} — ${r.repo_full_name}\n      ${r.description || ""}${(r.tags || []).length ? "  (" + r.tags.join(", ") + ")" : ""}`).join("\n");
+    },
+  },
+
   // ── playbooks ──
   list_playbooks: {
-    description: "List available playbooks (methodologies).",
+    description: "List the Kitchen's playbooks, methodologies and setup guides (grouped by kind).",
     schema: { type: "object", properties: {} },
-    run: async () => { const rows = await api(`/rest/v1/playbooks?select=title,description&order=title.asc`); return rows.length ? rows.map((p) => `  • ${p.title}${p.description ? " — " + p.description : ""}`).join("\n") : "No playbooks."; },
+    run: async () => {
+      const rows = await api(`/rest/v1/playbooks?select=title,description,kind&order=kind.asc,title.asc`);
+      if (!rows.length) return "No playbooks.";
+      const g = {};
+      for (const p of rows) (g[p.kind || "playbook"] = g[p.kind || "playbook"] || []).push(`  • ${p.title}${p.description ? " — " + p.description.slice(0, 100) : ""}`);
+      return Object.entries(g).map(([k, v]) => `${k.toUpperCase()}:\n${v.join("\n")}`).join("\n\n");
+    },
   },
   show_playbook: {
     description: "Show a playbook's steps by title (fuzzy match).",
