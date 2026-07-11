@@ -1068,6 +1068,25 @@ const TOOLS = {
     },
   },
 
+  update_playbook: {
+    description: "Update a playbook (found by title, fuzzy): title, description, kind, or content — content is the methodology Markdown doc the app generates steps from (## Titre = step, ``` fenced block = prompt, Tips: = tip). RLS: admins edit any playbook, engineers only their own.",
+    schema: { type: "object", properties: { playbook: { type: "string" }, title: { type: "string" }, description: { type: "string" }, kind: { type: "string", enum: ["playbook", "methodology", "setup"] }, content: { type: "string" } }, required: ["playbook"] },
+    run: async (a) => {
+      const pbs = await api(`/rest/v1/playbooks?select=id,title&title=ilike.*${encodeURIComponent(a.playbook)}*`);
+      if (!pbs.length) throw new Error(`No playbook matching "${a.playbook}".`);
+      const pb = pbs[0];
+      const patch = {};
+      if (a.title) patch.title = a.title;
+      if (a.description !== undefined) patch.description = a.description;
+      if (a.kind) patch.kind = a.kind;
+      if (a.content !== undefined) patch.content = a.content;
+      if (!Object.keys(patch).length) throw new Error("Nothing to update — pass title, description, kind and/or content.");
+      const updated = await api(`/rest/v1/playbooks?id=eq.${pb.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      if (!updated || !updated.length) throw new Error(`RLS refused the update on "${pb.title}" — engineers can only edit playbooks they own.`);
+      return `Updated playbook "${pb.title}" (${Object.keys(patch).join(", ")}).`;
+    },
+  },
+
   // ── recap ──
   recap: {
     description: "What got shipped: tasks completed in the last N days (default 7), grouped by mission.",
