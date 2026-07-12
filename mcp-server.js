@@ -1087,6 +1087,106 @@ const TOOLS = {
     },
   },
 
+  update_playbook_step: {
+    description: "Update a step of a playbook (playbook found by title fuzzy, step by its position number): title, description, prompt, tips, or move it to a new position.",
+    schema: { type: "object", properties: { playbook: { type: "string" }, position: { type: "number" }, title: { type: "string" }, description: { type: "string" }, prompt: { type: "string" }, tips: { type: "string" }, new_position: { type: "number" } }, required: ["playbook", "position"] },
+    run: async (a) => {
+      const pbs = await api(`/rest/v1/playbooks?select=id,title&title=ilike.*${encodeURIComponent(a.playbook)}*`);
+      if (!pbs.length) throw new Error(`No playbook matching "${a.playbook}".`);
+      const pb = pbs[0];
+      const patch = {};
+      for (const f of ["title", "description", "prompt", "tips"]) if (a[f] !== undefined) patch[f] = a[f];
+      if (a.new_position !== undefined) patch.position = a.new_position;
+      if (!Object.keys(patch).length) throw new Error("Nothing to update — pass title, description, prompt, tips and/or new_position.");
+      const updated = await api(`/rest/v1/playbook_steps?playbook_id=eq.${pb.id}&position=eq.${a.position}`, { method: "PATCH", body: JSON.stringify(patch) });
+      if (!updated || !updated.length) throw new Error(`No step at position ${a.position} in "${pb.title}" (or RLS refused — engineers only edit their own playbooks).`);
+      return `Updated step ${a.position} of "${pb.title}" (${Object.keys(patch).join(", ")}).`;
+    },
+  },
+  delete_playbook_step: {
+    description: "Delete a step of a playbook (playbook by title fuzzy, step by position). Remaining steps keep their positions.",
+    schema: { type: "object", properties: { playbook: { type: "string" }, position: { type: "number" } }, required: ["playbook", "position"] },
+    run: async (a) => {
+      const pbs = await api(`/rest/v1/playbooks?select=id,title&title=ilike.*${encodeURIComponent(a.playbook)}*`);
+      if (!pbs.length) throw new Error(`No playbook matching "${a.playbook}".`);
+      const pb = pbs[0];
+      const gone = await api(`/rest/v1/playbook_steps?playbook_id=eq.${pb.id}&position=eq.${a.position}`, { method: "DELETE", headers: { Prefer: "return=representation" } });
+      if (!gone || !gone.length) throw new Error(`No step at position ${a.position} in "${pb.title}" (or RLS refused).`);
+      return `Deleted step ${a.position} "${gone[0].title}" from "${pb.title}".`;
+    },
+  },
+
+  // ── scheduled replies ──
+  list_scheduled_replies: {
+    description: "Your scheduled email replies (pending first): recipient, subject, send time, status.",
+    schema: { type: "object", properties: { all: { type: "boolean", description: "include sent/failed/cancelled (default: pending only)" } } },
+    run: async (a) => {
+      const filter = a.all ? "" : "&status=eq.pending";
+      const rows = await api(`/rest/v1/scheduled_replies?select=id,to_list,subject,send_at,status,error&order=send_at.asc${filter}`);
+      if (!rows.length) return a.all ? "No scheduled replies." : "No pending scheduled replies.";
+      return rows.map((r) => `[${r.id.slice(0, 8)}] ${r.status.toUpperCase()} → ${r.to_list.join(", ")} — "${r.subject || "(no subject)"}" at ${r.send_at}${r.error ? ` (error: ${r.error})` : ""}`).join("\n");
+    },
+  },
+  cancel_scheduled_reply: {
+    description: "Cancel a pending scheduled reply by its id (or unambiguous id prefix from list_scheduled_replies).",
+    schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    run: async (a) => {
+      const rows = await api(`/rest/v1/scheduled_replies?select=id,subject,status&status=eq.pending`);
+      const hits = rows.filter((r) => r.id.startsWith(a.id));
+      if (!hits.length) throw new Error(`No pending scheduled reply with id starting "${a.id}".`);
+      if (hits.length > 1) throw new Error(`Ambiguous prefix "${a.id}" (${hits.length} matches) — give more characters.`);
+      await api(`/rest/v1/scheduled_replies?id=eq.${hits[0].id}`, { method: "PATCH", body: JSON.stringify({ status: "cancelled" }) });
+      return `Cancelled scheduled reply "${hits[0].subject || hits[0].id.slice(0, 8)}".`;
+    },
+  },
+
+  // ── email triage rules (learning loop) ──
+  list_triage_rules: {
+    description: "Your email triage rules learned or set (suppress/boost by sender or domain).",
+    schema: { type: "object", properties: {} },
+    run: async () => {
+      const rows = await api(`/rest/v1/user_triage_rules?select=id,kind,value,verdict,evidence_count,enabled&order=created_at.desc`);
+      if (!rows.length) return "No triage rules yet.";
+      return rows.map((r) => `[${r.id.slice(0, 8)}] ${r.enabled ? "ON " : "OFF"} ${r.verdict.toUpperCase()} ${r.kind}:${r.value} (evidence: ${r.evidence_count})`).join("\n");
+    },
+  },
+  add_triage_rule: {
+    description: "Add an email triage rule: suppress or boost a sender email or a whole domain.",
+    schema: { type: "object", properties: { kind: { type: "string", enum: ["sender", "domain"] }, value: { type: "string" }, verdict: { type: "string", enum: ["suppress", "boost"] } }, required: ["kind", "value", "verdict"] },
+    run: async (a) => {
+      const conf = loadConf();
+      await api(`/rest/v1/user_triage_rules`, { method: "POST", body: JSON.stringify({ user_id: conf.user_id, kind: a.kind, value: a.value, verdict: a.verdict, evidence_count: 0 }) });
+      return `Rule added: ${a.verdict} ${a.kind} ${a.value}.`;
+    },
+  },
+  delete_triage_rule: {
+    description: "Delete one of your triage rules by id (or unambiguous prefix from list_triage_rules).",
+    schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    run: async (a) => {
+      const rows = await api(`/rest/v1/user_triage_rules?select=id,kind,value,verdict`);
+      const hits = rows.filter((r) => r.id.startsWith(a.id));
+      if (!hits.length) throw new Error(`No triage rule with id starting "${a.id}".`);
+      if (hits.length > 1) throw new Error(`Ambiguous prefix "${a.id}" (${hits.length} matches).`);
+      await api(`/rest/v1/user_triage_rules?id=eq.${hits[0].id}`, { method: "DELETE" });
+      return `Deleted rule ${hits[0].verdict} ${hits[0].kind}:${hits[0].value}.`;
+    },
+  },
+
+  // ── contact blacklist ──
+  blacklist_contact: {
+    description: "Blacklist an email address from your contacts suggestions (or remove it from the blacklist with remove: true).",
+    schema: { type: "object", properties: { email: { type: "string" }, remove: { type: "boolean" } }, required: ["email"] },
+    run: async (a) => {
+      const conf = loadConf();
+      if (a.remove) {
+        await api(`/rest/v1/contact_blacklist?email=eq.${encodeURIComponent(a.email)}`, { method: "DELETE" });
+        return `Removed ${a.email} from the blacklist.`;
+      }
+      await api(`/rest/v1/contact_blacklist`, { method: "POST", body: JSON.stringify({ user_id: conf.user_id, email: a.email }) });
+      return `Blacklisted ${a.email}.`;
+    },
+  },
+
   // ── recap ──
   recap: {
     description: "What got shipped: tasks completed in the last N days (default 7), grouped by mission.",
