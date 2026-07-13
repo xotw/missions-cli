@@ -1190,6 +1190,54 @@ const TOOLS = {
     },
   },
 
+  // ── mission transcripts ──
+  add_transcript: {
+    description: "Archive a meeting transcript in a mission (staff-only table). meeting_date defaults to today (YYYY-MM-DD / today / yesterday accepted).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, content: { type: "string" }, meeting_date: { type: "string" } }, required: ["mission_key", "title", "content"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const conf = loadConf();
+      const body = { mission_id: m.id, title: a.title, content: a.content, source: "mcp", created_by: conf.user_id };
+      if (a.meeting_date) body.meeting_date = parseDate(a.meeting_date);
+      await api(`/rest/v1/mission_transcripts`, { method: "POST", body: JSON.stringify(body) });
+      return `Transcript "${a.title}" archived in ${m.key ?? m.name}${body.meeting_date ? ` (meeting ${body.meeting_date})` : ""}.`;
+    },
+  },
+  list_transcripts: {
+    description: "List a mission's archived transcripts (most recent meeting first): id, title, meeting date, size.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, limit: { type: "number" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const rows = await api(`/rest/v1/mission_transcripts?select=id,title,meeting_date,content&mission_id=eq.${m.id}&order=meeting_date.desc,created_at.desc&limit=${a.limit || 20}`);
+      if (!rows.length) return `No transcripts in ${m.key ?? m.name} yet.`;
+      return rows.map((r) => `[${r.id.slice(0, 8)}] ${r.meeting_date} — ${r.title} (${Math.round((r.content || "").length / 1000)}k chars)`).join("\n");
+    },
+  },
+  show_transcript: {
+    description: "Read one transcript in full, by id (or unambiguous prefix from list_transcripts).",
+    schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    run: async (a) => {
+      const rows = await api(`/rest/v1/mission_transcripts?select=id,title,meeting_date,content,missions(key)&order=created_at.desc&limit=200`);
+      const hits = rows.filter((r) => r.id.startsWith(a.id));
+      if (!hits.length) throw new Error(`No transcript with id starting "${a.id}".`);
+      if (hits.length > 1) throw new Error(`Ambiguous prefix "${a.id}" (${hits.length} matches).`);
+      const t = hits[0];
+      return `# ${t.title} — ${t.meeting_date} (${t.missions?.key ?? "?"})\n\n${t.content}`;
+    },
+  },
+  delete_transcript: {
+    description: "Delete an archived transcript by id (or unambiguous prefix). Destructive — always confirm the exact transcript with the user first.",
+    schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    run: async (a) => {
+      const rows = await api(`/rest/v1/mission_transcripts?select=id,title,meeting_date&order=created_at.desc&limit=200`);
+      const hits = rows.filter((r) => r.id.startsWith(a.id));
+      if (!hits.length) throw new Error(`No transcript with id starting "${a.id}".`);
+      if (hits.length > 1) throw new Error(`Ambiguous prefix "${a.id}" (${hits.length} matches).`);
+      await api(`/rest/v1/mission_transcripts?id=eq.${hits[0].id}`, { method: "DELETE" });
+      return `Deleted transcript "${hits[0].title}" (${hits[0].meeting_date}).`;
+    },
+  },
+
   // ── recap ──
   recap: {
     description: "What got shipped: tasks completed in the last N days (default 7), grouped by mission.",
