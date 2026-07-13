@@ -201,15 +201,18 @@ const TOOLS = {
     },
   },
   update_task: {
-    description: "Edit an existing task by reference (e.g. TEL-12). Set any of: due_date (YYYY-MM-DD / +Nd / today / tomorrow / weekday, or null to clear), priority (p1/p2/p3), title, assignee (teammate name). Only the fields you pass are changed.",
-    schema: { type: "object", properties: { task_ref: { type: "string" }, due_date: { type: ["string", "null"] }, priority: { type: "string", enum: ["p1", "p2", "p3"] }, title: { type: "string" }, assignee: { type: "string" } }, required: ["task_ref"] },
+    description: "Edit an existing task by reference (e.g. TEL-12). Set any of: due_date (YYYY-MM-DD / +Nd / today / tomorrow / weekday, or null to clear), priority (p1/p2/p3), title, assignee (teammate name), note (task body text, null to clear), tags (array, REPLACES existing tags), status (todo/doing/done). Only the fields you pass are changed.",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, due_date: { type: ["string", "null"] }, priority: { type: "string", enum: ["p1", "p2", "p3"] }, title: { type: "string" }, assignee: { type: "string" }, note: { type: ["string", "null"] }, tags: { type: "array", items: { type: "string" } }, status: { type: "string", enum: ["todo", "doing", "done"] } }, required: ["task_ref"] },
     run: async (a) => {
       const t = await resolveTask(a.task_ref); const patch = {}; const changed = [];
       if (a.due_date !== undefined) { patch.due_date = a.due_date === null ? null : parseDate(a.due_date); changed.push(patch.due_date ? "due " + patch.due_date : "due date cleared"); }
       if (a.priority) { patch.priority = a.priority; changed.push(a.priority); }
       if (a.title) { patch.title = a.title; changed.push("renamed"); }
       if (a.assignee) { const p = await resolveAssignee(a.assignee); patch.assignee_id = p.id; changed.push("→ " + p.full_name); }
-      if (!changed.length) return "Nothing to change — pass at least one field (due_date, priority, title, assignee).";
+      if (a.note !== undefined) { patch.note = a.note; changed.push(a.note === null ? "note cleared" : "note updated"); }
+      if (a.tags !== undefined) { patch.tags = a.tags; changed.push(`tags: ${a.tags.join(", ") || "(none)"}`); }
+      if (a.status) { patch.status = a.status; patch.done_at = a.status === "done" ? new Date().toISOString() : null; changed.push(a.status); }
+      if (!changed.length) return "Nothing to change — pass at least one field (due_date, priority, title, assignee, note, tags, status).";
       await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify(patch) });
       return `Updated ${t.mission.key}-${t.number}: ${changed.join(", ")}`;
     },
