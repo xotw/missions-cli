@@ -1330,6 +1330,90 @@ const TOOLS = {
     },
   },
 
+  share_file: {
+    description: "Share (or unshare) a mission file with the client and/or freelancers, by filename (fuzzy).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, filename: { type: "string" }, client: { type: "boolean" }, freelance: { type: "boolean" } }, required: ["mission_key", "filename"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const fs = await api(`/rest/v1/mission_files?select=id,filename&mission_id=eq.${m.id}&filename=ilike.*${encodeURIComponent(a.filename)}*`);
+      if (!fs.length) throw new Error(`No file matching "${a.filename}" on ${m.key ?? m.name}.`);
+      if (fs.length > 1) throw new Error(`Ambiguous: ${fs.map((f) => f.filename).join(", ")}`);
+      const patch = {}; const parts = [];
+      if (a.client != null) { patch.is_client_visible = !!a.client; parts.push(`client:${a.client ? "shared" : "hidden"}`); }
+      if (a.freelance != null) { patch.visible_to_freelance = !!a.freelance; parts.push(`freelance:${a.freelance ? "shared" : "hidden"}`); }
+      if (!parts.length) throw new Error("Pass client and/or freelance.");
+      await api(`/rest/v1/mission_files?id=eq.${fs[0].id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `${fs[0].filename}: ${parts.join(", ")}`;
+    },
+  },
+  share_note: {
+    description: "Share (or unshare) a mission note with the client and/or freelancers, by title (fuzzy).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, title: { type: "string" }, client: { type: "boolean" }, freelance: { type: "boolean" } }, required: ["mission_key", "title"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const ns = await api(`/rest/v1/mission_notes?select=id,title&mission_id=eq.${m.id}&title=ilike.*${encodeURIComponent(a.title)}*`);
+      if (!ns.length) throw new Error(`No note matching "${a.title}" on ${m.key ?? m.name}.`);
+      if (ns.length > 1) throw new Error(`Ambiguous: ${ns.map((n) => n.title).join(" · ")}`);
+      const patch = {}; const parts = [];
+      if (a.client != null) { patch.is_client_visible = !!a.client; parts.push(`client:${a.client ? "shared" : "hidden"}`); }
+      if (a.freelance != null) { patch.visible_to_freelance = !!a.freelance; parts.push(`freelance:${a.freelance ? "shared" : "hidden"}`); }
+      if (!parts.length) throw new Error("Pass client and/or freelance.");
+      await api(`/rest/v1/mission_notes?id=eq.${ns[0].id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `"${ns[0].title}": ${parts.join(", ")}`;
+    },
+  },
+  resend_invite: {
+    description: "Resend the invitation email to a head, client or freelance who never connected (found by name, fuzzy). Uses the invite template; reports whether the email actually left.",
+    schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+    run: async (a) => {
+      const profs = await api(`/rest/v1/profiles?select=id,full_name,role&full_name=ilike.*${encodeURIComponent(a.name)}*&or=(is_preview.is.null,is_preview.eq.false)`);
+      if (!profs.length) throw new Error(`No profile matching "${a.name}".`);
+      if (profs.length > 1) throw new Error(`Ambiguous: ${profs.map((p) => `${p.full_name} (${p.role})`).join(", ")}`);
+      const conf = loadConf();
+      const r = await fetch(`${URL_}/functions/v1/admin-mission-head`, {
+        method: "POST",
+        headers: { apikey: ANON, Authorization: `Bearer ${conf.access_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "resend_invite", user_id: profs[0].id }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      const sent = j.email_sent !== false;
+      return `${profs[0].full_name}: invitation ${sent ? "renvoyée (email parti)" : "générée mais EMAIL NON PARTI"}${!sent && j.invite_link ? ` — lien à transmettre : ${j.invite_link}` : ""}`;
+    },
+  },
+  team_status: {
+    description: "Connection status of all invited heads and freelances: who has signed in, who never connected (red-dot list). Admin only.",
+    schema: { type: "object", properties: {} },
+    run: async () => {
+      const conf = loadConf();
+      const call = async (action) => {
+        const r = await fetch(`${URL_}/functions/v1/admin-mission-head`, {
+          method: "POST",
+          headers: { apikey: ANON, Authorization: `Bearer ${conf.access_token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        return r.ok ? r.json() : { };
+      };
+      const [h, f] = await Promise.all([call("list_all_heads"), call("list_all_freelances")]);
+      const rows = [...(h.heads || []).map((x) => ({ ...x, kind: "head" })), ...(f.freelances || []).map((x) => ({ ...x, kind: "freelance" }))];
+      if (!rows.length) return "No invited heads or freelances found.";
+      return rows.map((x) => {
+        const last = x.last_sign_in_at || x.lastLogin || null;
+        return `${last ? "🟢" : "🔴"} ${x.full_name} (${x.kind})${last ? ` — dernière connexion ${String(last).slice(0, 10)}` : " — JAMAIS CONNECTÉ"}`;
+      }).join("\n");
+    },
+  },
+  stale_work: {
+    description: "Tasks postponed 2+ times across missions (the stale-work radar): ref, title, postpone count, due date.",
+    schema: { type: "object", properties: { min_postpones: { type: "number" } } },
+    run: async (a) => {
+      const min = a.min_postpones || 2;
+      const rows = await api(`/rest/v1/tasks?select=number,title,postponed_count,due_date,missions!inner(key)&status=neq.done&postponed_count=gte.${min}&order=postponed_count.desc&limit=40`);
+      if (!rows.length) return `No open task postponed ${min}+ times. Clean board.`;
+      return rows.map((t) => `${t.missions.key}-${t.number} · ${t.postponed_count}× reporté · due ${t.due_date || "—"} — ${t.title.slice(0, 80)}`).join("\n");
+    },
+  },
+
   // ── recap ──
   recap: {
     description: "What got shipped: tasks completed in the last N days (default 7), grouped by mission.",
