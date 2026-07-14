@@ -396,12 +396,16 @@ const TOOLS = {
     run: async (a) => { const t = await resolveTask(a.task_ref); await api(`/rest/v1/rpc/set_task_urgency`, { method: "POST", body: JSON.stringify({ _task_id: t.id, _urgency: a.urgency }) }); return `${t.mission.key}-${t.number} urgency → ${a.urgency}`; },
   },
   set_task_visibility: {
-    description: "Set whether a task is visible to the client in the customer portal, by task ref (e.g. TEL-12). client:true shows it to the client, false hides it.",
-    schema: { type: "object", properties: { task_ref: { type: "string" }, client: { type: "boolean" } }, required: ["task_ref", "client"] },
+    description: "Set a task's audience visibility by ref (e.g. TEL-12): client (customer portal) and/or freelance (freelance members). Pass only what you want to change.",
+    schema: { type: "object", properties: { task_ref: { type: "string" }, client: { type: "boolean" }, freelance: { type: "boolean" } }, required: ["task_ref"] },
     run: async (a) => {
       const t = await resolveTask(a.task_ref);
-      await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ is_client_visible: !!a.client }) });
-      return `${t.mission.key}-${t.number} → ${a.client ? "visible to client" : "hidden from client"}`;
+      const patch = {}; const parts = [];
+      if (a.client != null) { patch.is_client_visible = !!a.client; parts.push(`client:${a.client ? "visible" : "hidden"}`); }
+      if (a.freelance != null) { patch.visible_to_freelance = !!a.freelance; parts.push(`freelance:${a.freelance ? "visible" : "hidden"}`); }
+      if (!parts.length) throw new Error("Pass client and/or freelance.");
+      await api(`/rest/v1/tasks?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `${t.mission.key}-${t.number} → ${parts.join(", ")}`;
     },
   },
 
@@ -1235,6 +1239,94 @@ const TOOLS = {
       if (hits.length > 1) throw new Error(`Ambiguous prefix "${a.id}" (${hits.length} matches).`);
       await api(`/rest/v1/mission_transcripts?id=eq.${hits[0].id}`, { method: "DELETE" });
       return `Deleted transcript "${hits[0].title}" (${hits[0].meeting_date}).`;
+    },
+  },
+
+  // ── compose email (Bob persona for terminal sends) ──
+  compose_email: {
+    description: "Compose and send a NEW email from the user's connected Gmail (not a reply). Terminal sends are written in the Bob persona: intro 'C'est Bob, l'assistant IA de Gab.', states what/when Gab follows up, never commits on substance, signs 'Bob — l'IA de Gab'. Show the draft to the user before sending unless told otherwise.",
+    schema: { type: "object", properties: { to: { type: "array", items: { type: "string" } }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "array", items: { type: "string" } } }, required: ["to", "subject", "body"] },
+    run: async (a) => {
+      const conns = await api(`/rest/v1/user_connections?select=id&provider=eq.gmail&limit=1`);
+      if (!conns.length) throw new Error("No Gmail connection — connect Gmail in the app first.");
+      const conf = loadConf();
+      const r = await fetch(`${URL_}/functions/v1/gmail-compose`, {
+        method: "POST",
+        headers: { apikey: ANON, Authorization: `Bearer ${conf.access_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ connection_id: conns[0].id, to: a.to, cc: a.cc || [], subject: a.subject, body: a.body }),
+      });
+      if (!r.ok) { let d = ""; try { d = (await r.json()).error || ""; } catch {} throw new Error(`Compose failed (HTTP ${r.status})${d ? ": " + d : ""}`); }
+      return `Email sent to ${a.to.join(", ")} — "${a.subject}".`;
+    },
+  },
+
+  // ── kickoff questionnaire ──
+  questionnaire_status: {
+    description: "A mission's kickoff questionnaire status: draft/sent/in_progress/completed + answered count.",
+    schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const qs = await api(`/rest/v1/mission_questionnaires?select=id,status,sent_at,completed_at&mission_id=eq.${m.id}`);
+      if (!qs.length) return `${m.key ?? m.name}: no kickoff questionnaire yet.`;
+      const q = qs[0];
+      const items = await api(`/rest/v1/mission_questionnaire_items?select=id&questionnaire_id=eq.${q.id}`);
+      const answers = await api(`/rest/v1/questionnaire_answers?select=id,answer&questionnaire_id=eq.${q.id}`);
+      const filled = answers.filter((x) => (x.answer || "").trim()).length;
+      return `${m.key ?? m.name}: ${q.status.toUpperCase()} — ${filled}/${items.length} answered${q.sent_at ? ` · sent ${q.sent_at.slice(0, 10)}` : ""}${q.completed_at ? ` · completed ${q.completed_at.slice(0, 10)}` : ""}`;
+    },
+  },
+  read_questionnaire: {
+    description: "Read a mission's kickoff questionnaire in full: questions by section with the client's answers. Gold for kickoff prep.",
+    schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const qs = await api(`/rest/v1/mission_questionnaires?select=id,status&mission_id=eq.${m.id}`);
+      if (!qs.length) return `${m.key ?? m.name}: no kickoff questionnaire yet.`;
+      const items = await api(`/rest/v1/mission_questionnaire_items?select=id,position,custom_section,custom_text,questionnaire_questions(section,question),questionnaire_answers(answer,answered_at)&questionnaire_id=eq.${qs[0].id}&order=position.asc`);
+      if (!items.length) return `${m.key ?? m.name}: questionnaire has no questions yet.`;
+      let out = []; let lastSection = null;
+      for (const it of items) {
+        const section = it.custom_section || (it.questionnaire_questions && it.questionnaire_questions.section) || "Custom";
+        const question = it.custom_text || (it.questionnaire_questions && it.questionnaire_questions.question) || "?";
+        const ansRel = it.questionnaire_answers;
+        const ans = Array.isArray(ansRel) ? (ansRel[0] && ansRel[0].answer) : (ansRel && ansRel.answer);
+        if (section !== lastSection) { out.push(`\n## ${section}`); lastSection = section; }
+        out.push(`Q: ${question}\nA: ${(ans || "").trim() || "(sans réponse)"}`);
+      }
+      return `# Questionnaire ${m.key ?? m.name} (${qs[0].status})\n` + out.join("\n\n");
+    },
+  },
+
+  // ── audience sharing (freelance/head opt-ins) ──
+  share_stack_tool: {
+    description: "Share (or unshare) a mission STACK tool with the head and/or freelancers — the opt-in visibility toggles. Tool found by name (fuzzy) in the mission's stack.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, name: { type: "string" }, head: { type: "boolean" }, freelance: { type: "boolean" } }, required: ["mission_key", "name"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const tools = await api(`/rest/v1/stack_tools?select=id,name&mission_id=eq.${m.id}&name=ilike.*${encodeURIComponent(a.name)}*`);
+      if (!tools.length) throw new Error(`No stack tool matching "${a.name}" on ${m.key ?? m.name}.`);
+      const patch = {}; const parts = [];
+      if (a.head != null) { patch.visible_to_head = !!a.head; parts.push(`head:${a.head ? "shared" : "hidden"}`); }
+      if (a.freelance != null) { patch.visible_to_freelance = !!a.freelance; parts.push(`freelance:${a.freelance ? "shared" : "hidden"}`); }
+      if (!parts.length) throw new Error("Pass head and/or freelance.");
+      await api(`/rest/v1/stack_tools?id=eq.${tools[0].id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `${m.key ?? m.name} · ${tools[0].name}: ${parts.join(", ")}`;
+    },
+  },
+  share_transcript: {
+    description: "Share (or unshare) an archived transcript with the head and/or freelancers, by id prefix from list_transcripts.",
+    schema: { type: "object", properties: { id: { type: "string" }, head: { type: "boolean" }, freelance: { type: "boolean" } }, required: ["id"] },
+    run: async (a) => {
+      const rows = await api(`/rest/v1/mission_transcripts?select=id,title&order=created_at.desc&limit=300`);
+      const hits = rows.filter((r) => r.id.startsWith(a.id));
+      if (!hits.length) throw new Error(`No transcript with id starting "${a.id}".`);
+      if (hits.length > 1) throw new Error(`Ambiguous prefix "${a.id}" (${hits.length} matches).`);
+      const patch = {}; const parts = [];
+      if (a.head != null) { patch.visible_to_head = !!a.head; parts.push(`head:${a.head ? "shared" : "hidden"}`); }
+      if (a.freelance != null) { patch.visible_to_freelance = !!a.freelance; parts.push(`freelance:${a.freelance ? "shared" : "hidden"}`); }
+      if (!parts.length) throw new Error("Pass head and/or freelance.");
+      await api(`/rest/v1/mission_transcripts?id=eq.${hits[0].id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      return `"${hits[0].title}": ${parts.join(", ")}`;
     },
   },
 
