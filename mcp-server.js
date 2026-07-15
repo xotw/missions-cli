@@ -558,13 +558,25 @@ const TOOLS = {
     },
   },
   delete_file: {
-    description: "Delete a file from a mission by filename (fuzzy). Removes both the stored object and the record. Destructive — confirm the exact file with the user first.",
-    schema: { type: "object", properties: { mission_key: { type: "string" }, filename: { type: "string" } }, required: ["mission_key", "filename"] },
+    description: "Delete a file from a mission by filename (fuzzy) or by id (from the ambiguity error or list_files). Removes both the stored object and the record. Destructive — confirm the exact file with the user first. When several files share the same name, the error lists each candidate with its id prefix, size and date — retry with the id.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, filename: { type: "string" }, id: { type: "string", description: "file id or unambiguous id prefix — bypasses name matching (needed for identically-named duplicates)" } }, required: ["mission_key"] },
     run: async (a) => {
       const m = await resolveMission(a.mission_key);
-      const rows = await api(`/rest/v1/mission_files?select=id,filename,storage_path&mission_id=eq.${m.id}&filename=ilike.*${encodeURIComponent(a.filename)}*`);
-      if (!rows.length) throw new Error(`No file matching "${a.filename}" in ${m.key}.`);
-      if (rows.length > 1) throw new Error(`"${a.filename}" matches ${rows.length} files (${rows.map((r) => r.filename).join(", ")}) — be more specific.`);
+      let rows;
+      if (a.id) {
+        const all = await api(`/rest/v1/mission_files?select=id,filename,storage_path&mission_id=eq.${m.id}`);
+        rows = all.filter((r) => r.id.startsWith(a.id));
+        if (!rows.length) throw new Error(`No file with id starting "${a.id}" in ${m.key}.`);
+        if (rows.length > 1) throw new Error(`Ambiguous id prefix "${a.id}" (${rows.length} matches) — give more characters.`);
+      } else {
+        if (!a.filename) throw new Error("Pass filename or id.");
+        rows = await api(`/rest/v1/mission_files?select=id,filename,storage_path,size_bytes,created_at&mission_id=eq.${m.id}&filename=ilike.*${encodeURIComponent(a.filename)}*`);
+        if (!rows.length) throw new Error(`No file matching "${a.filename}" in ${m.key}.`);
+        if (rows.length > 1) {
+          const list = rows.map((r) => `  [${r.id.slice(0, 8)}] ${r.filename} · ${Math.round((r.size_bytes || 0) / 1024)} KB · ${String(r.created_at).slice(0, 16)}`).join("\n");
+          throw new Error(`"${a.filename}" matches ${rows.length} files — retry with the id:\n${list}`);
+        }
+      }
       const f = rows[0];
       const encPath = f.storage_path.split("/").map(encodeURIComponent).join("/");
       await api(`/storage/v1/object/mission-files/${encPath}`, { method: "DELETE" }).catch(() => {});
