@@ -452,8 +452,8 @@ const TOOLS = {
     },
   },
   update_mission: {
-    description: "Edit a mission's fields by key. Set any of: name, status (active/paused/completed/archived), phase (e.g. setup/live), head (a teammate's name — assigns the head of mission; empty string clears it), client_company, start_date, end_date (YYYY-MM-DD / +Nd / weekday, or null to clear), goal, slack_url, notion_url, dashboard_url, customer_language (fr/en — drives portal + client emails), mission_type, visibility (team/private), color (#hex). Only the fields you pass change.",
-    schema: { type: "object", properties: { mission_key: { type: "string" }, name: { type: "string" }, status: { type: "string" }, phase: { type: "string" }, head: { type: "string" }, client_company: { type: "string" }, start_date: { type: ["string", "null"] }, end_date: { type: ["string", "null"] }, goal: { type: "string" }, slack_url: { type: "string" }, notion_url: { type: "string" }, dashboard_url: { type: "string" }, customer_language: { type: "string", enum: ["fr", "en"] }, mission_type: { type: "string" }, visibility: { type: "string", enum: ["team", "private"] }, color: { type: "string" } }, required: ["mission_key"] },
+    description: "Edit a mission's fields by key. Set any of: name, status (active/paused/completed/archived), phase (e.g. setup/live), head (a teammate's name — assigns the head of mission; empty string clears it), client_company, start_date, end_date (YYYY-MM-DD / +Nd / weekday, or null to clear), goal, slack_url, notion_url, dashboard_url, excalidraw_url (embedded schema, staff tab + portal Résultats), customer_language (fr/en — drives portal + client emails), mission_type, visibility (team/private), color (#hex). Only the fields you pass change.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, name: { type: "string" }, status: { type: "string" }, phase: { type: "string" }, head: { type: "string" }, client_company: { type: "string" }, start_date: { type: ["string", "null"] }, end_date: { type: ["string", "null"] }, goal: { type: "string" }, slack_url: { type: "string" }, notion_url: { type: "string" }, dashboard_url: { type: "string" }, excalidraw_url: { type: "string" }, customer_language: { type: "string", enum: ["fr", "en"] }, mission_type: { type: "string" }, visibility: { type: "string", enum: ["team", "private"] }, color: { type: "string" } }, required: ["mission_key"] },
     run: async (a) => {
       const m = await resolveMission(a.mission_key);
       const patch = {};
@@ -471,6 +471,7 @@ const TOOLS = {
       if (a.slack_url != null) patch.slack_url = a.slack_url;
       if (a.notion_url != null) patch.notion_url = a.notion_url;
       if (a.dashboard_url != null) patch.dashboard_url = a.dashboard_url;
+if (a.excalidraw_url != null) patch.excalidraw_url = a.excalidraw_url;
       if (a.customer_language) patch.customer_language = a.customer_language;
       if (a.mission_type) patch.mission_type = a.mission_type;
       if (a.visibility) patch.visibility = a.visibility;
@@ -503,15 +504,15 @@ const TOOLS = {
 
   // ── mission files ──
   list_files: {
-    description: "List the files attached to a mission (by key): filename, size, type, and who can see them (head/client).",
+    description: "List the files attached to a mission (by key): id (for delete_file/pin_file), filename, size, audience (head/client/freelance) and pinned state.",
     schema: { type: "object", properties: { mission_key: { type: "string" } }, required: ["mission_key"] },
     run: async (a) => {
       const m = await resolveMission(a.mission_key);
-      const rows = await api(`/rest/v1/mission_files?select=filename,size_bytes,content_type,visible_to_head,visible_to_client,created_at&mission_id=eq.${m.id}&order=created_at.desc`);
+      const rows = await api(`/rest/v1/mission_files?select=id,filename,size_bytes,content_type,visible_to_head,visible_to_client,visible_to_freelance,is_pinned,created_at&mission_id=eq.${m.id}&order=created_at.desc`);
       if (!rows.length) return `${m.key}: no files.`;
       return `${m.key} — files (${rows.length})\n` + rows.map((f) => {
-        const vis = [f.visible_to_head && "head", f.visible_to_client && "client"].filter(Boolean).join("+") || "internal";
-        return `  ${f.filename}  (${Math.max(1, Math.round(f.size_bytes / 1024))}KB · ${vis})`;
+        const vis = [f.visible_to_head && "head", f.visible_to_client && "client", f.visible_to_freelance && "freelance"].filter(Boolean).join("+") || "internal";
+        return `[${f.id.slice(0, 8)}] ${f.is_pinned ? "📌 " : ""}  ${f.filename}  (${Math.max(1, Math.round(f.size_bytes / 1024))}KB · ${vis})`;
       }).join("\n");
     },
   },
@@ -1343,17 +1344,18 @@ const TOOLS = {
   },
 
   share_file: {
-    description: "Share (or unshare) a mission file with the client and/or freelancers, by filename (fuzzy).",
-    schema: { type: "object", properties: { mission_key: { type: "string" }, filename: { type: "string" }, client: { type: "boolean" }, freelance: { type: "boolean" } }, required: ["mission_key", "filename"] },
+    description: "Share (or unshare) a mission file with the client, head and/or freelancers, by filename (fuzzy).",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, filename: { type: "string" }, client: { type: "boolean" }, head: { type: "boolean" }, freelance: { type: "boolean" } }, required: ["mission_key", "filename"] },
     run: async (a) => {
       const m = await resolveMission(a.mission_key);
       const fs = await api(`/rest/v1/mission_files?select=id,filename&mission_id=eq.${m.id}&filename=ilike.*${encodeURIComponent(a.filename)}*`);
       if (!fs.length) throw new Error(`No file matching "${a.filename}" on ${m.key ?? m.name}.`);
       if (fs.length > 1) throw new Error(`Ambiguous: ${fs.map((f) => f.filename).join(", ")}`);
       const patch = {}; const parts = [];
-      if (a.client != null) { patch.is_client_visible = !!a.client; parts.push(`client:${a.client ? "shared" : "hidden"}`); }
+      if (a.client != null) { patch.visible_to_client = !!a.client; parts.push(`client:${a.client ? "shared" : "hidden"}`); }
+      if (a.head != null) { patch.visible_to_head = !!a.head; parts.push(`head:${a.head ? "shared" : "hidden"}`); }
       if (a.freelance != null) { patch.visible_to_freelance = !!a.freelance; parts.push(`freelance:${a.freelance ? "shared" : "hidden"}`); }
-      if (!parts.length) throw new Error("Pass client and/or freelance.");
+      if (!parts.length) throw new Error("Pass client, head and/or freelance.");
       await api(`/rest/v1/mission_files?id=eq.${fs[0].id}`, { method: "PATCH", body: JSON.stringify(patch) });
       return `${fs[0].filename}: ${parts.join(", ")}`;
     },
@@ -1394,7 +1396,7 @@ const TOOLS = {
     },
   },
   team_status: {
-    description: "Connection status of all invited heads and freelances: who has signed in, who never connected (red-dot list). Admin only.",
+    description: "Connection status of all invited heads, freelances AND portal clients: who has signed in, who never connected (red-dot list). Admin only.",
     schema: { type: "object", properties: {} },
     run: async () => {
       const conf = loadConf();
@@ -1407,7 +1409,23 @@ const TOOLS = {
         return r.ok ? r.json() : { };
       };
       const [h, f] = await Promise.all([call("list_all_heads"), call("list_all_freelances")]);
-      const rows = [...(h.heads || []).map((x) => ({ ...x, kind: "head" })), ...(f.freelances || []).map((x) => ({ ...x, kind: "freelance" }))];
+      const contacts = await api(`/rest/v1/mission_contacts?select=email,full_name`);
+      const emails = [...new Set(contacts.map((c) => c.email).filter(Boolean))];
+      const cs = emails.length ? await (async () => {
+        const r2 = await fetch(`${URL_}/functions/v1/admin-mission-head`, {
+          method: "POST",
+          headers: { apikey: ANON, Authorization: `Bearer ${conf.access_token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "list_auth_status", emails }),
+        });
+        return r2.ok ? r2.json() : {};
+      })() : {};
+      const byEmail = cs.by_email || {};
+      const clientRows = contacts.filter((c) => byEmail[c.email] && byEmail[c.email].profile_id).map((c) => ({
+        full_name: c.full_name || c.email, kind: "client", last_sign_in_at: byEmail[c.email].last_sign_in_at,
+      }));
+      const seen = new Set();
+      const dedupClients = clientRows.filter((c) => !seen.has(c.full_name) && seen.add(c.full_name));
+      const rows = [...(h.heads || []).map((x) => ({ ...x, kind: "head" })), ...(f.freelances || []).map((x) => ({ ...x, kind: "freelance" })), ...dedupClients];
       if (!rows.length) return "No invited heads or freelances found.";
       return rows.map((x) => {
         const last = x.last_sign_in_at || x.lastLogin || null;
@@ -1423,6 +1441,23 @@ const TOOLS = {
       const rows = await api(`/rest/v1/tasks?select=number,title,postponed_count,due_date,missions!inner(key)&status=neq.done&postponed_count=gte.${min}&order=postponed_count.desc&limit=40`);
       if (!rows.length) return `No open task postponed ${min}+ times. Clean board.`;
       return rows.map((t) => `${t.missions.key}-${t.number} · ${t.postponed_count}× reporté · due ${t.due_date || "—"} — ${t.title.slice(0, 80)}`).join("\n");
+    },
+  },
+
+  pin_file: {
+    description: "Pin (or unpin with pinned:false) a mission file to the mission Aperçu — max 2 pinned per mission, newest pin wins. File by filename (fuzzy) or id.",
+    schema: { type: "object", properties: { mission_key: { type: "string" }, filename: { type: "string" }, id: { type: "string" }, pinned: { type: "boolean" } }, required: ["mission_key"] },
+    run: async (a) => {
+      const m = await resolveMission(a.mission_key);
+      const all = await api(`/rest/v1/mission_files?select=id,filename&mission_id=eq.${m.id}`);
+      if (!a.id && !a.filename) throw new Error("Pass filename or id.");
+      const rows = a.id ? all.filter((r) => r.id.startsWith(a.id))
+        : all.filter((r) => r.filename.toLowerCase().includes((a.filename || "").toLowerCase()));
+      if (!rows.length) throw new Error(`No matching file in ${m.key}.`);
+      if (rows.length > 1) throw new Error(`Ambiguous — candidates: ${rows.map((r) => `[${r.id.slice(0, 8)}] ${r.filename}`).join(", ")}`);
+      const pinned = a.pinned !== false;
+      await api(`/rest/v1/mission_files?id=eq.${rows[0].id}`, { method: "PATCH", body: JSON.stringify({ is_pinned: pinned, pinned_at: pinned ? new Date().toISOString() : null }) });
+      return `${rows[0].filename}: ${pinned ? "épinglé sur l'Aperçu" : "désépinglé"}.`;
     },
   },
 
